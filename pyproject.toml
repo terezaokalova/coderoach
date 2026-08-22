@@ -1,8 +1,6 @@
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
-[tool.pytest.ini_options]
-pythonpath = ["src"]
 
 [tool.ruff]
 # interface/ is governed by interface/AGENTS.md, which defines its own
@@ -10,3 +8,4 @@ pythonpath = ["src"]
 # pushing to it. Reformatting either from here rewrites code we do not own
 # and manufactures merge conflicts. Drop an entry once its owner opts in.
 extend-exclude = ["interface", "rl_control"]
+src = ["src"]
