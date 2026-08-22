@@ -7,7 +7,13 @@ import random
 from typing import Protocol
 
 from .camera import MovementState
-from .env import Observation, StimAction, clamp_duty, snap_duration_ms
+from .env import (
+    Observation,
+    StimAction,
+    clamp_duty,
+    observation_from_pose,
+    snap_duration_ms,
+)
 
 
 class Policy(Protocol):
@@ -187,6 +193,72 @@ class NoveltyBandit:
         if index < 0:
             return
         self.q[index] += self.alpha * (reward - self.q[index])
+
+
+class PathPolicy:
+    """High-level path; low-level stim. Inner policy never chooses direction.
+
+    Waypoints pick left, right, or wait. The wrapped teach policy only picks
+    frequency and duration so the same anti-habituation controller can drive
+    any route.
+    """
+
+    def __init__(
+        self,
+        waypoints: tuple[tuple[float, float], ...],
+        inner,
+        arrive_radius: float = 0.12,
+        deadband_rad: float = 0.22,
+    ) -> None:
+        if not waypoints:
+            raise ValueError("path needs at least one waypoint")
+        self.waypoints = waypoints
+        self.inner = inner
+        self.arrive_radius = arrive_radius
+        self.deadband_rad = deadband_rad
+        self.index = 0
+
+    @property
+    def finished(self) -> bool:
+        return self.index >= len(self.waypoints)
+
+    def observe(self, state: MovementState) -> Observation:
+        if self.finished:
+            return Observation(heading_error_rad=0.0, distance=0.0)
+        return observation_from_pose(
+            state.x, state.y, state.heading_rad, self.waypoints[self.index]
+        )
+
+    def act(self, state: MovementState) -> StimAction:
+        self._advance(state)
+        if self.finished:
+            return StimAction("wait", frequency_hz=0, pulse_width_ms=0, duration_ms=0)
+        error = self.observe(state).heading_error_rad
+        if abs(error) <= self.deadband_rad:
+            return StimAction("wait", frequency_hz=0, pulse_width_ms=0, duration_ms=0)
+        pulse = self.inner.act(state)
+        return StimAction(
+            direction="left" if error > 0 else "right",
+            frequency_hz=pulse.frequency_hz,
+            pulse_width_ms=pulse.pulse_width_ms,
+            duration_ms=pulse.duration_ms,
+        )
+
+    def update(
+        self,
+        state: MovementState,
+        action: StimAction,
+        reward: float,
+        next_state: MovementState,
+    ) -> None:
+        self._advance(next_state)
+        if action.direction == "wait":
+            return
+        self.inner.update(state, action, reward, next_state)
+
+    def _advance(self, state: MovementState) -> None:
+        while not self.finished and self.observe(state).distance <= self.arrive_radius:
+            self.index += 1
 
 
 def make_teach_policy(name: str, direction: str = "left"):

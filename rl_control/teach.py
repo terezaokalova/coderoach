@@ -15,6 +15,7 @@ from .camera import (
     movement_from_poses,
 )
 from .env import StimAction, clamp_duty, snap_duration_ms, wrap_pi
+from .policy import PathPolicy
 
 
 class Stimulator(Protocol):
@@ -66,6 +67,12 @@ class HabituatingAnimal:
             self.heading_rad += turn
         else:
             self.heading_rad -= turn
+        self._walk(response)
+
+    def coast(self) -> None:
+        self._walk(math.exp(-2.2 * self.fatigue))
+
+    def _walk(self, response: float) -> None:
         speed = 0.09 * (0.15 + 0.85 * response)
         self.x += speed * math.cos(self.heading_rad)
         self.y += speed * math.sin(self.heading_rad)
@@ -88,8 +95,8 @@ class HabituatingAnimal:
 class AntiHabituationEnv:
     """Sustained turning without freezing. Action is frequency and duration.
 
-    Direction is fixed so the agent spends its capacity on an irregular pulse
-    pattern instead of choosing left vs right.
+    Teach loops pin direction so the inner policy only picks the pulse.
+    PathPolicy may change direction or wait on each step.
     """
 
     def __init__(
@@ -164,10 +171,19 @@ class AntiHabituationEnv:
         )
 
     async def step(self, action: StimAction) -> tuple[MovementState, float, bool]:
-        action = self.bind_action(action.frequency_hz, action.duration_ms)
-        if self.animal is not None:
-            self.animal.apply(action)
-        await self.stimulator.pulse(action)
+        if action.direction == "wait":
+            if self.animal is not None:
+                self.animal.coast()
+            frequency_hz = 0
+            duration_ms = 0
+        else:
+            self.direction = action.direction
+            action = self.bind_action(action.frequency_hz, action.duration_ms)
+            frequency_hz = action.frequency_hz
+            duration_ms = action.duration_ms
+            if self.animal is not None:
+                self.animal.apply(action)
+            await self.stimulator.pulse(action)
         pose = await self.tracker.read()
         if self._prev is None:
             self._prev = pose
@@ -176,15 +192,18 @@ class AntiHabituationEnv:
             pose,
             self._heading,
             self._still,
-            action.frequency_hz,
-            action.duration_ms,
+            frequency_hz,
+            duration_ms,
             self.still_speed,
         )
         self._prev = pose
         self._heading = state.heading_rad
         self._still = state.still_steps
-        sign = 1.0 if self.direction == "left" else -1.0
-        reward = sign * state.turn_rate_rad + 0.3 * state.speed
+        if action.direction == "wait":
+            reward = 0.3 * state.speed
+        else:
+            sign = 1.0 if self.direction == "left" else -1.0
+            reward = sign * state.turn_rate_rad + 0.3 * state.speed
         if state.speed <= self.still_speed:
             reward -= 0.6
         done = state.still_steps >= self.max_still
@@ -222,6 +241,49 @@ def _with_direction(action: StimAction, direction: str) -> StimAction:
         pulse_width_ms=action.pulse_width_ms,
         duration_ms=action.duration_ms,
     )
+
+
+async def follow_path(
+    env: AntiHabituationEnv,
+    policy: PathPolicy,
+    max_steps: int,
+    on_step: Callable[[StepLog], None] | None = None,
+) -> tuple[list[StepLog], bool]:
+    if max_steps < 1:
+        raise ValueError("max_steps must be at least 1")
+    state = await env.reset()
+    logs: list[StepLog] = []
+    for step in range(1, max_steps + 1):
+        action = policy.act(state)
+        next_state, reward, done = await env.step(action)
+        policy.update(state, action, reward, next_state)
+        log = StepLog(step, next_state, action, reward)
+        logs.append(log)
+        if on_step is not None:
+            on_step(log)
+        state = next_state
+        if policy.finished:
+            return logs, True
+        if done:
+            return logs, False
+    return logs, False
+
+
+def format_path_step(log: StepLog, policy: PathPolicy) -> str:
+    n = len(policy.waypoints)
+    wp = min(policy.index + 1, n)
+    dist = 0.0 if policy.finished else policy.observe(log.state).distance
+    return (
+        f"step {log.step:02d}  wp {wp}/{n}  dist {dist:.3f}  "
+        f"{log.action.direction:5s}  "
+        f"-> {log.action.frequency_hz} Hz  {log.action.duration_ms} ms  "
+        f"r={log.reward:+.2f}"
+    )
+
+
+def summarize_path(logs: list[StepLog], success: bool) -> str:
+    status = "SUCCESS" if success else "FAIL"
+    return f"{status}  {summarize(logs)}"
 
 
 async def teach(
