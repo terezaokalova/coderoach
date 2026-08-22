@@ -7,9 +7,9 @@ import json
 
 import pytest
 from bleak.exc import BleakError
-
 from interface import StimulationSettings
 from interface.roboroach import MIN_STIM_INTERVAL_S
+
 from stim import StimGate, settings_id
 
 # Inside the envelope interface/roboroach.py enforces: 1-10 Hz, 1 ms pulse,
