@@ -17,3 +17,5 @@ dependencies:
   - jupyterlab
   - pyyaml
   - black
+  - pip:
+      - bleak>=1.1,<4
