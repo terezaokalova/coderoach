@@ -16,12 +16,13 @@ import sounddevice as sd
 # What Whisper consumes. Anything else has to be resampled before ASR.
 SAMPLE_RATE = 16000
 
-# The rig mic, which is not the system default: CoreAudio hands index 1 (the
-# built-in MacBook mic) to anything that asks for the default, and it sits too
-# far from the speaker to clear the peak gate reliably. Index is positional, so
-# plugging in another input device can renumber it; pass `device=` to override,
-# or `device=None` to fall back to whatever the OS calls the default.
-DEFAULT_INPUT_DEVICE = 0
+# The built-in MacBook mic, which is also what CoreAudio currently hands out as
+# the system default. It is pinned by index rather than left to the default so
+# the capture device cannot move mid-session: a Teams or Zoom virtual input
+# appearing is enough to change what "default" means. Index is positional, so
+# plugging in another input can renumber it; pass `device=` to override, or
+# `device=None` to follow the OS default instead.
+DEFAULT_INPUT_DEVICE = 1
 
 
 @dataclass(frozen=True)
