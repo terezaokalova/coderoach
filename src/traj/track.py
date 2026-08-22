@@ -776,9 +776,11 @@ def render(
             (12, 26 + 22 * row),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
-            COLOUR_WARN
-            if "unavailable" in text or "no detection" in text
-            else COLOUR_TEXT,
+            (
+                COLOUR_WARN
+                if "unavailable" in text or "no detection" in text
+                else COLOUR_TEXT
+            ),
             1,
             cv2.LINE_AA,
         )
