@@ -1,0 +1,17 @@
+name: axohack
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - numpy
+  - pandas
+  - pyarrow
+  - zarr>=3
+  - numcodecs
+  - fsspec
+  - aiohttp
+  - matplotlib
+  - scipy
+  - ipykernel
+  - jupyterlab
