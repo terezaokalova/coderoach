@@ -1,13 +1,15 @@
 """The single point through which every module requests a stimulation.
 
-Text, voice, and trajectory control all call :meth:`StimGate.request`. The gate
-owns the refractory period and the trial counter ``n``, so the stimulation
+Text, voice, trajectory, and RL control all call :meth:`StimGate.request`. The
+gate owns the refractory period and the trial counter ``n``, so the stimulation
 budget is enforced in one place instead of once per caller, and ``n`` stays a
 valid index into the habituation curve across every source.
 
 The gate does not reimplement the Bluetooth interface. It holds an already
 connected ``interface.RoboRoach`` and calls its public ``configure``,
-``read_settings``, and ``turn``.
+``read_settings``, and ``turn``. ``turn`` carries its own hardware envelope
+guard, so the gate's refractory period is the upper of the two limits, never a
+way around the lower one.
 """
 
 from __future__ import annotations
@@ -17,23 +19,26 @@ import hashlib
 import json
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
 from interface import StimulationSettings
+from interface.roboroach import MIN_STIM_INTERVAL_S
 
 Direction = Literal["left", "right"]
-Source = Literal["text", "voice", "traj"]
+Source = Literal["text", "voice", "traj", "rl"]
 
 DIRECTIONS: frozenset[str] = frozenset(("left", "right"))
-REQUEST_SOURCES: frozenset[str] = frozenset(("text", "voice", "traj"))
+REQUEST_SOURCES: frozenset[str] = frozenset(("text", "voice", "traj", "rl"))
 
 LOG_NAME = "stim_gate.jsonl"
 SOURCES_JSON_NAME = "sources.json"
 
 REFRACTORY = "refractory"
 WRITE_FAILED = "write_failed"
+SAFETY_GUARD = "safety_guard"
 
 
 class RoachLike(Protocol):
@@ -70,6 +75,7 @@ class StimResult:
     t_write_complete: float | None
     n: int
     reject_reason: str | None
+    settings_id: str
 
 
 def settings_id(settings: StimulationSettings) -> str:
@@ -119,18 +125,22 @@ class StimGate:
         t_refrac_s: float,
         settings: StimulationSettings,
         run_dir: Path | str,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         t_refrac_s = float(t_refrac_s)
+        _check_refractory_clears_hardware_floor(t_refrac_s)
         _check_refractory_covers_stimulus(t_refrac_s, settings.duration_ms, "requested")
 
         self._roach = roach
         self._t_refrac_s = t_refrac_s
         self._requested_settings = settings
         self._run_dir = Path(run_dir)
+        self._clock = clock
         self._lock = asyncio.Lock()
         self._n = 0
         self._t_last_accepted: float | None = None
         self._settings: StimulationSettings | None = None
+        self._settings_seen: dict[str, dict] = {}
 
     @classmethod
     async def create(
@@ -140,6 +150,7 @@ class StimGate:
         t_refrac_s: float,
         settings: StimulationSettings,
         run_dir: Path | str,
+        clock: Callable[[], float] = time.monotonic,
     ) -> StimGate:
         """Configure the board once, read back what it holds, and record it."""
         gate = cls(
@@ -147,8 +158,10 @@ class StimGate:
             t_refrac_s=t_refrac_s,
             settings=settings,
             run_dir=run_dir,
+            clock=clock,
         )
-        await gate._apply_settings()
+        gate._run_dir.mkdir(parents=True, exist_ok=True)
+        await gate._configure_board(settings)
         return gate
 
     @property
@@ -162,13 +175,18 @@ class StimGate:
 
     @property
     def settings(self) -> StimulationSettings:
-        """What the board reported after configuration."""
+        """What the board reported at the last configuration."""
         return self._require_configured()
 
     @property
     def settings_id(self) -> str:
-        """Short id for the settings the board reported."""
+        """Short id for the settings currently on the board."""
         return settings_id(self._require_configured())
+
+    @property
+    def settings_seen(self) -> dict[str, dict]:
+        """Every distinct settings id this gate has put on the board."""
+        return dict(self._settings_seen)
 
     @property
     def log_path(self) -> Path:
@@ -179,14 +197,21 @@ class StimGate:
         direction: Direction,
         source: Source,
         request_id: str,
+        settings: StimulationSettings | None = None,
     ) -> StimResult:
         """Ask for one stimulation. Returns whether it fired.
 
-        The refractory check, the Bluetooth write, and the counter increment
-        happen under one lock, so two callers racing at the same instant
-        cannot both pass the check and stimulate twice.
+        The refractory check, the optional reconfiguration, the Bluetooth
+        write, and the counter increment happen under one lock, so two callers
+        racing at the same instant cannot both pass the check and stimulate
+        twice.
+
+        ``settings`` reconfigures the board for this request only, and the
+        logged ``settings_id`` is that request's own. Passing nothing leaves
+        whatever the last configuration put on the board, and the log records
+        that, not the value the run started with.
         """
-        t_request = time.monotonic()
+        t_request = self._clock()
         if direction not in DIRECTIONS:
             raise ValueError(f"direction must be one of {sorted(DIRECTIONS)}")
         if source not in REQUEST_SOURCES:
@@ -196,60 +221,83 @@ class StimGate:
         async with self._lock:
             if self._in_refractory():
                 return self._log(
-                    StimResult(
+                    self._result(
                         accepted=False,
                         request_id=request_id,
                         source=source,
                         direction=direction,
                         t_request=t_request,
                         t_write_complete=None,
-                        n=self._n,
                         reject_reason=REFRACTORY,
                     )
                 )
 
+            if settings is not None:
+                await self._configure_board(settings)
+
             try:
                 await self._roach.turn(direction)
-            except Exception:
-                # The write may already have reached the backpack, so hold the
-                # refractory window shut. The stimulation is not confirmed, so
-                # it does not enter the habituation count. Fail visibly and do
-                # not retry: interface/AGENTS.md requires both.
-                self._t_last_accepted = time.monotonic()
+            except RuntimeError:
+                # turn() runs its hardware envelope guard, and reaches for the
+                # connected client, before any GATT write. Both failures raise
+                # RuntimeError and both happen with nothing sent, so the
+                # refractory window is left open and the caller may retry once
+                # the guard's own interval has passed. bleak raises its own
+                # exception types, none of which subclass RuntimeError.
                 self._log(
-                    StimResult(
+                    self._result(
                         accepted=False,
                         request_id=request_id,
                         source=source,
                         direction=direction,
                         t_request=t_request,
                         t_write_complete=None,
-                        n=self._n,
+                        reject_reason=SAFETY_GUARD,
+                    )
+                )
+                raise
+            except Exception:
+                # A write that failed partway may already have reached the
+                # backpack, so hold the refractory window shut. The
+                # stimulation is not confirmed, so it does not enter the
+                # habituation count. Fail visibly and do not retry:
+                # interface/AGENTS.md requires both.
+                self._t_last_accepted = self._clock()
+                self._log(
+                    self._result(
+                        accepted=False,
+                        request_id=request_id,
+                        source=source,
+                        direction=direction,
+                        t_request=t_request,
+                        t_write_complete=None,
                         reject_reason=WRITE_FAILED,
                     )
                 )
                 raise
 
-            t_write_complete = time.monotonic()
+            t_write_complete = self._clock()
             self._t_last_accepted = t_write_complete
             self._n += 1
             return self._log(
-                StimResult(
+                self._result(
                     accepted=True,
                     request_id=request_id,
                     source=source,
                     direction=direction,
                     t_request=t_request,
                     t_write_complete=t_write_complete,
-                    n=self._n,
                     reject_reason=None,
                 )
             )
 
+    def _result(self, **fields: object) -> StimResult:
+        return StimResult(n=self._n, settings_id=self.settings_id, **fields)
+
     def _in_refractory(self) -> bool:
         if self._t_last_accepted is None:
             return False
-        return (time.monotonic() - self._t_last_accepted) < self._t_refrac_s
+        return (self._clock() - self._t_last_accepted) < self._t_refrac_s
 
     def _require_configured(self) -> StimulationSettings:
         if self._settings is None:
@@ -259,14 +307,13 @@ class StimGate:
             )
         return self._settings
 
-    async def _apply_settings(self) -> None:
-        requested = self._requested_settings
+    async def _configure_board(self, settings: StimulationSettings) -> None:
         await self._roach.configure(
-            frequency_hz=requested.frequency_hz,
-            pulse_width_ms=requested.pulse_width_ms,
-            duration_ms=requested.duration_ms,
-            gain_percent=requested.gain_percent,
-            random_mode=requested.random_mode,
+            frequency_hz=settings.frequency_hz,
+            pulse_width_ms=settings.pulse_width_ms,
+            duration_ms=settings.duration_ms,
+            gain_percent=settings.gain_percent,
+            random_mode=settings.random_mode,
         )
         # configure() returns None, so the settings the board holds have to be
         # read back. The readback is what will actually fire, so it is what the
@@ -277,8 +324,10 @@ class StimGate:
         )
 
         self._settings = board
-        self._run_dir.mkdir(parents=True, exist_ok=True)
-        self._write_sources_json()
+        identifier = settings_id(board)
+        if identifier not in self._settings_seen:
+            self._settings_seen[identifier] = asdict(board)
+            self._write_sources_json()
 
     def _write_sources_json(self) -> None:
         path = self._run_dir / SOURCES_JSON_NAME
@@ -297,10 +346,11 @@ class StimGate:
             document = loaded
 
         document["stim_gate"] = {
-            "settings_id": self.settings_id,
+            "settings_id_initial": next(iter(self._settings_seen), None),
+            "settings_seen": self._settings_seen,
             "t_refrac_s": self._t_refrac_s,
+            "min_stim_interval_s": MIN_STIM_INTERVAL_S,
             "settings_requested": asdict(self._requested_settings),
-            "settings_readback": asdict(self._require_configured()),
             **_git_provenance(),
         }
 
@@ -318,11 +368,21 @@ class StimGate:
             "n": result.n,
             "accepted": result.accepted,
             "reject_reason": result.reject_reason,
-            "settings_id": self.settings_id,
+            "settings_id": result.settings_id,
         }
         with self.log_path.open("a") as handle:
             handle.write(json.dumps(line) + "\n")
         return result
+
+
+def _check_refractory_clears_hardware_floor(t_refrac_s: float) -> None:
+    if t_refrac_s < MIN_STIM_INTERVAL_S:
+        raise ValueError(
+            f"T_refrac of {t_refrac_s} s is below the interface's "
+            f"MIN_STIM_INTERVAL_S of {MIN_STIM_INTERVAL_S} s. turn() would "
+            "refuse the write anyway, so a shorter gate would only convert "
+            "hardware refusals into gate rejections. Raise T_refrac."
+        )
 
 
 def _check_refractory_covers_stimulus(
