@@ -7,14 +7,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from .camera import (
+from interface.camera import Pose, PoseTracker, SimulatedCamera
+
+from .env import (
     MovementState,
-    Pose,
-    PoseTracker,
-    SimulatedCamera,
+    StimAction,
+    clamp_duty,
     movement_from_poses,
+    snap_duration_ms,
+    wrap_pi,
 )
-from .env import StimAction, clamp_duty, snap_duration_ms, wrap_pi
 from .policy import PathPolicy
 
 
@@ -134,8 +136,17 @@ class AntiHabituationEnv:
         cls,
         stimulator: Stimulator,
         direction: str = "left",
+        tracker: PoseTracker | None = None,
     ) -> "AntiHabituationEnv":
-        """Real stim, simulated pose. Swap tracker later for a camera."""
+        """Real stim. Pass a camera tracker to drop the simulated animal."""
+        if tracker is not None:
+            return cls(
+                tracker=tracker,
+                stimulator=stimulator,
+                direction=direction,
+                still_speed=0.01,
+                max_still=12,
+            )
         animal = HabituatingAnimal()
         return cls(
             tracker=SimulatedCamera(animal),
@@ -204,9 +215,9 @@ class AntiHabituationEnv:
         else:
             sign = 1.0 if self.direction == "left" else -1.0
             reward = sign * state.turn_rate_rad + 0.3 * state.speed
-        if state.speed <= self.still_speed:
+        if state.still_steps > 0:
             reward -= 0.6
-        done = state.still_steps >= self.max_still
+        done = self.max_still > 0 and state.still_steps >= self.max_still
         return state, reward, done
 
 
@@ -291,12 +302,19 @@ async def teach(
     policy: TeachPolicy,
     max_steps: int,
     on_step: Callable[[StepLog], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[StepLog]:
-    if max_steps < 1:
-        raise ValueError("max_steps must be at least 1")
+    if max_steps < 0:
+        raise ValueError("max_steps must be 0 (forever) or at least 1")
     state = await env.reset()
     logs: list[StepLog] = []
-    for step in range(1, max_steps + 1):
+    step = 0
+    while True:
+        step += 1
+        if max_steps and step > max_steps:
+            break
+        if should_stop is not None and should_stop():
+            break
         action = policy.act(state)
         next_state, reward, done = await env.step(action)
         policy.update(state, action, reward, next_state)
@@ -364,7 +382,8 @@ def summarize(logs: list[StepLog]) -> str:
 
 def format_teach_step(log: StepLog) -> str:
     return (
-        f"step {log.step:02d}  spd {log.state.speed:.3f}  "
+        f"step {log.step:02d}  x {log.state.x:.3f} y {log.state.y:.3f}  "
+        f"spd {log.state.speed:.3f}  "
         f"turn {log.state.turn_rate_rad:+.3f}  still {log.state.still_steps}  "
         f"-> {log.action.frequency_hz} Hz  {log.action.duration_ms} ms  "
         f"r={log.reward:+.2f}"

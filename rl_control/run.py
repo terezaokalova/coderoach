@@ -6,8 +6,8 @@ import argparse
 import asyncio
 import math
 
-from .env import SimWorld, format_step
-from .policy import HeadingPolicy, PathPolicy, make_teach_policy
+from .env import SimWorld, StimAction, format_step
+from .policy import HeadingPolicy, PathPolicy, make_teach_policy, status_text
 from .teach import (
     AntiHabituationEnv,
     follow_path,
@@ -22,6 +22,33 @@ from .teach import (
 )
 
 DEFAULT_PATH = ((0.4, 0.15), (0.8, 0.4), (1.2, 0.1))
+
+
+class PauseStim:
+    def __init__(self, cooldown: float) -> None:
+        self.cooldown = cooldown
+
+    async def pulse(self, action: StimAction) -> None:
+        await asyncio.sleep(self.cooldown)
+
+
+def add_camera_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--source",
+        default="phone",
+        help="phone, camera index, jpeg path, or HTTP/RTSP URL",
+    )
+    parser.add_argument("--tracker", choices=("blob", "csrt"), default="blob")
+    parser.add_argument(
+        "--sim-pose",
+        action="store_true",
+        help="keep the simulated animal instead of the iPhone tracker",
+    )
+    parser.add_argument(
+        "--camera",
+        action="store_true",
+        help="use the iPhone stream without pulsing the backpack",
+    )
 
 
 def parse_waypoint(text: str) -> tuple[float, float]:
@@ -52,13 +79,14 @@ async def run_teach_sim(args: argparse.Namespace) -> None:
     names = ("static", "irregular") if args.compare else (args.policy,)
     plot = None
     if not args.no_plot:
-        from .plot import LiveRunPlot
+        from interface.plot import LiveRunPlot
 
         plot = LiveRunPlot(names[0])
     for name in names:
         env = AntiHabituationEnv.simulated(direction=args.direction)
         policy = make_teach_policy(name, direction=args.direction)
         if plot is not None:
+            plot.extra = lambda current=policy: status_text(current)
             plot.reset(name)
         logs = await teach(
             env,
@@ -78,12 +106,14 @@ async def run_teach_sim(args: argparse.Namespace) -> None:
 async def run_reversal_sim(args: argparse.Namespace) -> None:
     plot = None
     if not args.no_plot:
-        from .plot import LiveRunPlot
+        from interface.plot import LiveRunPlot
 
         plot = LiveRunPlot(args.policy)
     env = AntiHabituationEnv.simulated()
     env.max_still = 8
     policy = make_teach_policy(args.policy, direction="left")
+    if plot is not None:
+        plot.extra = lambda: status_text(policy)
 
     def on_step(log, progress: dict[str, float]) -> None:
         if plot is not None:
@@ -100,6 +130,60 @@ async def run_reversal_sim(args: argparse.Namespace) -> None:
     print(summarize_reversal(logs, progress, success))
     if plot is not None:
         plot.hold()
+
+
+async def run_camera_teach(args: argparse.Namespace) -> None:
+    if args.compare:
+        raise SystemExit("compare is simulation-only")
+    from interface.plot import make_live_plot, run_with_dashboard
+    from interface.track import open_camera
+
+    tracker = open_camera(args)
+    if tracker is None:
+        raise SystemExit("camera teach needs the phone stream, not --sim-pose")
+    policy = make_teach_policy(args.policy, direction=args.direction)
+    env = AntiHabituationEnv.wired(
+        PauseStim(args.cooldown),
+        direction=args.direction,
+        tracker=tracker,
+    )
+    env.max_still = 0
+    plot = None
+    if not args.no_plot:
+        plot = make_live_plot(
+            f"{args.policy}  state=camera  stim=silent",
+            tracker,
+            extra=lambda: status_text(policy),
+        )
+    print(
+        "Camera teach: pose from iPhone, no backpack pulse. "
+        "Runs until you press Ctrl+C or close the window."
+    )
+
+    def on_step(log) -> None:
+        if plot is not None:
+            plot.update(log)
+        print(format_teach_step(log), flush=True)
+
+    async def work():
+        return await teach(
+            env,
+            policy,
+            max_steps=0,
+            on_step=on_step,
+            should_stop=None if plot is None else plot.closed,
+        )
+
+    try:
+        logs = await run_with_dashboard(plot, tracker, work)
+        print(summarize(logs))
+    except RuntimeError as exc:
+        print(exc)
+    except KeyboardInterrupt:
+        print("stopped")
+    finally:
+        if tracker is not None:
+            tracker.stop()
 
 
 async def run_path_sim(args: argparse.Namespace) -> None:
@@ -144,6 +228,7 @@ def main() -> None:
     teach_p.add_argument("--no-plot", action="store_true")
     teach_p.add_argument("--cooldown", type=float, default=2.0)
     teach_p.add_argument("--timeout", type=float, default=10.0)
+    add_camera_args(teach_p)
 
     rev_p = sub.add_parser(
         "reversal",
@@ -159,6 +244,7 @@ def main() -> None:
     rev_p.add_argument("--no-plot", action="store_true")
     rev_p.add_argument("--cooldown", type=float, default=2.0)
     rev_p.add_argument("--timeout", type=float, default=10.0)
+    add_camera_args(rev_p)
 
     goal_p = sub.add_parser("goal", help="heading correction toward a point")
     goal_p.add_argument("--live", action="store_true")
@@ -192,6 +278,9 @@ def main() -> None:
     path_p.add_argument("--arrive", type=float, default=0.12)
 
     args = parser.parse_args()
+    if args.command == "teach" and args.camera:
+        asyncio.run(run_camera_teach(args))
+        return
     if args.max_steps < 1:
         raise SystemExit("max-steps must be at least 1")
     if args.command == "teach":

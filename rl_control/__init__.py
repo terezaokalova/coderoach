@@ -1,7 +1,6 @@
-"""Teaching and control on top of the RoboRoach stim interface."""
+"""Teaching and control on top of the RoboRoach hardware interface."""
 
-from .camera import KeyboardCamera, MovementState, Pose, PoseTracker, SimulatedCamera
-from .env import Observation, StimAction
+from .env import MovementState, Observation, StimAction
 from .policy import (
     HeadingPolicy,
     IrregularPulsePolicy,
@@ -14,13 +13,9 @@ __all__ = [
     "AntiHabituationEnv",
     "HeadingPolicy",
     "IrregularPulsePolicy",
-    "KeyboardCamera",
     "MovementState",
     "NoveltyBandit",
     "Observation",
-    "Pose",
-    "PoseTracker",
-    "SimulatedCamera",
     "StaticPulsePolicy",
     "StepLog",
     "StimAction",

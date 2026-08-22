@@ -10,6 +10,8 @@ import math
 from dataclasses import dataclass
 from typing import Literal
 
+from interface.camera import Pose
+
 Direction = Literal["left", "right", "wait"]
 
 
@@ -25,6 +27,71 @@ class StimAction:
 class Observation:
     heading_error_rad: float
     distance: float
+
+
+@dataclass(frozen=True)
+class MovementState:
+    x: float
+    y: float
+    vx: float
+    vy: float
+    speed: float
+    heading_rad: float
+    turn_rate_rad: float
+    still_steps: int
+    last_frequency_hz: int
+    last_duration_ms: int
+
+    @property
+    def vector(self) -> tuple[float, float]:
+        return (self.vx, self.vy)
+
+    def as_array(self) -> list[float]:
+        return [
+            self.vx,
+            self.vy,
+            self.speed,
+            self.turn_rate_rad,
+            float(self.still_steps),
+            self.last_frequency_hz / 150.0,
+            self.last_duration_ms / 1000.0,
+        ]
+
+
+def movement_from_poses(
+    prev: Pose,
+    cur: Pose,
+    prev_heading_rad: float,
+    still_steps: int,
+    last_frequency_hz: int,
+    last_duration_ms: int,
+    still_speed: float,
+) -> MovementState:
+    dt = max(cur.t - prev.t, 1e-3)
+    dx = cur.x - prev.x
+    dy = cur.y - prev.y
+    disp = math.hypot(dx, dy)
+    vx = dx / dt
+    vy = dy / dt
+    speed = disp / dt
+    heading = math.atan2(dy, dx) if disp > still_speed else prev_heading_rad
+    turn = (heading - prev_heading_rad + math.pi) % (2 * math.pi) - math.pi
+    if disp <= still_speed:
+        still_steps += 1
+    else:
+        still_steps = 0
+    return MovementState(
+        x=cur.x,
+        y=cur.y,
+        vx=vx,
+        vy=vy,
+        speed=speed,
+        heading_rad=heading,
+        turn_rate_rad=turn / dt,
+        still_steps=still_steps,
+        last_frequency_hz=last_frequency_hz,
+        last_duration_ms=last_duration_ms,
+    )
 
 
 def wrap_pi(angle: float) -> float:

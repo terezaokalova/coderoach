@@ -1,17 +1,25 @@
 # RoboRoach Bluetooth interface
 
-This folder contains the Python interface for a Backyard Brains RoboRoach
-backpack. It uses Bluetooth Low Energy (BLE) through
-[`bleak`](https://bleak.readthedocs.io/) and mirrors the service and
+This folder contains the hardware interface for a Backyard Brains RoboRoach:
+the Bluetooth backpack and the iPhone or webcam pose stream. BLE uses
+[bleak](https://bleak.readthedocs.io/) and mirrors the service and
 characteristics in Backyard Brains' [official RoboRoach
-repository](https://github.com/BackyardBrains/RoboRoach).
+repository](https://github.com/BackyardBrains/RoboRoach). RL policy code
+lives in rl_control/.
 
 ## Files
 
-- `roboroach.py` implements scanning, connection management, settings, turn
+- roboroach.py implements scanning, connection management, settings, turn
   commands, and the persistent terminal session.
-- `__init__.py` exposes `RoboRoach` and `StimulationSettings` for imports.
-- `AGENTS.md` defines the protocol, safety, testing, and maintenance rules for
+- camera.py defines Pose and the PoseTracker stand-ins (simulated and
+  keyboard).
+- track.py livestreams Continuity Camera or a webcam and locks onto the
+  roach. macos/RoachCam.swift is the helper that writes live frames.
+- plot.py is the live dashboard (video plus stim and motion panels).
+- __init__.py exposes RoboRoach, StimulationSettings, Pose, PoseTracker,
+  SimulatedCamera, and KeyboardCamera. It does not import OpenCV or open a
+  camera.
+- AGENTS.md defines the protocol, safety, testing, and maintenance rules for
   changes in this folder.
 
 ## Before connecting
@@ -106,6 +114,26 @@ asyncio.run(main())
 
 Use a single `asyncio.run()` call and keep the `async with` block open for the
 whole control session.
+
+Pose comes from the camera side, not the backpack:
+
+```python
+from interface import Pose, SimulatedCamera
+from interface.track import PhonePoseTracker
+```
+
+## iPhone or webcam
+
+Unlock the iPhone, keep it near the Mac or on a cable, and allow Camera access
+for RoachCam if macOS asks.
+
+```bash
+python -m interface.track --source phone
+python -m interface.track --list
+```
+
+Click and drag a box on the roach. The helper writes frames for the live
+dashboard used by rl_control teach --camera and teach --live.
 
 ## BLE protocol
 
