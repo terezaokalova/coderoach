@@ -16,6 +16,13 @@ import sounddevice as sd
 # What Whisper consumes. Anything else has to be resampled before ASR.
 SAMPLE_RATE = 16000
 
+# The rig mic, which is not the system default: CoreAudio hands index 1 (the
+# built-in MacBook mic) to anything that asks for the default, and it sits too
+# far from the speaker to clear the peak gate reliably. Index is positional, so
+# plugging in another input device can renumber it; pass `device=` to override,
+# or `device=None` to fall back to whatever the OS calls the default.
+DEFAULT_INPUT_DEVICE = 0
+
 
 @dataclass(frozen=True)
 class Recording:
@@ -34,7 +41,9 @@ class Recording:
         return float(np.abs(self.samples).max()) if self.samples.size else 0.0
 
 
-def record_window(seconds: float, device: int | str | None = None) -> Recording:
+def record_window(
+    seconds: float, device: int | str | None = DEFAULT_INPUT_DEVICE
+) -> Recording:
     """Block for `seconds`, then return mono float32 at SAMPLE_RATE.
 
     t_capture_start is stamped once the stream is actually running, and
