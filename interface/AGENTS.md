@@ -34,7 +34,12 @@ replacement and migration instructions are added in the same change.
 - A user action may produce at most one turn pulse unless the user explicitly
   requests a bounded sequence. Never implement an unbounded stimulation loop.
 - Keep validation on frequency, pulse width/duty cycle, duration, and gain.
-  Default values must remain conservative and within published ranges.
+  This is a living animal under online control, not an organoid culture:
+  frequency 1 to 10 Hz, pulse width 1 ms, duration 200 to 300 ms, gain at
+  most 10%, at least 2 s between trains (behavioral response is 1-2 s), at
+  most 30 trains or 9 s of train time in a rolling 60 s window. Expired
+  events drop off; there is no washout lockout. turn() must call this guard
+  before the GATT write. Do not add a switch that disables the envelope.
 - Keepalive traffic must rewrite an unchanged non-stimulation setting. Never
   use `B2B5` or `B2B6` as a heartbeat.
 - Do not silently increase stimulation settings to compensate for an unreliable

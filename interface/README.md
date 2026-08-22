@@ -93,10 +93,10 @@ async def main():
     async with RoboRoach() as roach:
         print(await roach.read_settings())
         await roach.configure(
-            frequency_hz=55,
-            pulse_width_ms=5,
-            duration_ms=500,
-            gain_percent=50,
+            frequency_hz=10,
+            pulse_width_ms=1,
+            duration_ms=250,
+            gain_percent=10,
         )
         await roach.turn_left()
 
@@ -124,10 +124,27 @@ All RoboRoach values below are single bytes under service `B2B0`:
 The standard battery-level characteristic is `2A19`. Short UUIDs are expanded
 using the Bluetooth base UUID `0000xxxx-0000-1000-8000-00805f9b34fb`.
 
+## Biological envelope
+
+Waveform caps stay weak (the backpack steps pulse width in milliseconds and
+drives a 3 V pot). Timing is for a living cockroach under online control:
+the animal turns in about 1-2 seconds, so the next train waits for that
+response. There is no culture washout.
+
+- Frequency 1 to 10 Hz, pulse width 1 ms, duration 200 to 300 ms, gain 0 to
+  10%. Duty cycle stays at or below 50%.
+- At least 2 seconds between trains.
+- At most 30 trains, or 9 seconds of combined train time, in a rolling 60
+  second window. Older events age out and control continues. The log is
+  shared across processes.
+
+A refused pulse raises an error and does not write the turn characteristic.
+These limits are a floor, not a license to ignore the animal. Stop if the
+board is hot, the connector is loose, or the roach is not recovering.
+
 ## Responsible operation
 
 RoboRoach behavior is variable and repeated stimulation causes habituation.
-Do not use unbounded turn loops or assume an exact angle from a pulse. Use
-isolated commands, limit stimulation, and allow ample recovery time. Inspect
+Do not use unbounded turn loops or assume an exact angle from a pulse. Inspect
 electrode and ground connections with the backpack powered off rather than
-compensating for weak responses by immediately increasing gain or pulse width.
+compensating for weak responses by increasing gain or pulse width.

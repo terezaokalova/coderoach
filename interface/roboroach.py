@@ -1,16 +1,21 @@
 """Async Python interface for the Backyard Brains RoboRoach BLE backpack.
 
 The UUIDs and one-byte values mirror Backyard Brains' Android client and
-firmware. This module only talks to the backpack; it does not bypass any of
-the board's firmware limits.
+firmware. Waveform caps stay conservative (10 Hz, 1 ms, 200-300 ms, 10%
+gain). Timing is for a living animal under online control: wait ~2 s for
+the turn, then allow the next train. There is no culture washout.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import tempfile
+import time
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from bleak import BleakClient, BleakScanner
@@ -31,6 +36,22 @@ TURN_RIGHT_UUID = bluetooth_uuid(0xB2B6)
 GAIN_UUID = bluetooth_uuid(0xB2B7)
 BATTERY_UUID = bluetooth_uuid(0x2A19)
 
+# Living-animal online control. A train produces a turn in about 1-2 s, so
+# the next pulse waits for that response. A rolling 60 s window caps count
+# and train time so charge cannot stack; expired events drop and control
+# continues. No organoid washout. Waveform stays at the weakest hardware
+# settings that still match a 10 Hz / 200-300 ms train.
+MIN_STIM_INTERVAL_S = 2.0
+MAX_PULSES_PER_WINDOW = 30
+MAX_STIM_MS_PER_WINDOW = 9000
+SAFETY_WINDOW_S = 60.0
+MAX_FREQUENCY_HZ = 10
+MAX_PULSE_WIDTH_MS = 1
+MIN_DURATION_MS = 200
+MAX_DURATION_MS = 300
+MAX_GAIN_PERCENT = 10
+_SAFETY_PATH = Path(tempfile.gettempdir()) / "roboroach-safety.json"
+
 
 @dataclass(frozen=True)
 class StimulationSettings:
@@ -39,6 +60,64 @@ class StimulationSettings:
     duration_ms: int
     gain_percent: int
     random_mode: bool
+
+
+def _load_stim_log() -> list[dict]:
+    try:
+        raw = json.loads(_SAFETY_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [event for event in raw if isinstance(event, dict)]
+
+
+def _save_stim_log(events: list[dict]) -> None:
+    _SAFETY_PATH.write_text(json.dumps(events))
+
+
+def _recent_stims(now: float) -> list[dict]:
+    return [
+        event
+        for event in _load_stim_log()
+        if now - float(event.get("t", 0)) <= SAFETY_WINDOW_S
+    ]
+
+
+def _window_wait_s(events: list[dict], now: float) -> float:
+    oldest = float(events[0].get("t", 0))
+    return max(1.0, SAFETY_WINDOW_S - (now - oldest))
+
+
+def guard_turn(duration_ms: int) -> None:
+    """Refuse a pulse that is too soon or over the rolling charge budget."""
+    now = time.time()
+    events = _recent_stims(now)
+    if events:
+        wait = MIN_STIM_INTERVAL_S - (now - float(events[-1].get("t", 0)))
+        if wait > 0:
+            raise RuntimeError(
+                f"Wait {wait:.1f}s for the animal to finish the last turn."
+            )
+    if len(events) >= MAX_PULSES_PER_WINDOW:
+        raise RuntimeError(
+            f"At most {MAX_PULSES_PER_WINDOW} trains in "
+            f"{int(SAFETY_WINDOW_S)}s. Wait {_window_wait_s(events, now):.0f}s "
+            "for the oldest pulse to age out."
+        )
+    used = sum(int(event.get("duration_ms", 0)) for event in events)
+    if used + duration_ms > MAX_STIM_MS_PER_WINDOW:
+        raise RuntimeError(
+            f"Train-time budget for this {int(SAFETY_WINDOW_S)}s window is "
+            f"used. Wait {_window_wait_s(events, now):.0f}s before more pulses."
+        )
+
+
+def record_turn(duration_ms: int) -> None:
+    now = time.time()
+    events = _recent_stims(now)
+    events.append({"t": now, "duration_ms": int(duration_ms)})
+    _save_stim_log(events)
 
 
 class RoboRoach:
@@ -55,6 +134,7 @@ class RoboRoach:
         self.name = name
         self.scan_timeout = scan_timeout
         self.client: BleakClient | None = None
+        self._duration_ms = 250
 
     async def connect(self) -> None:
         if self.device is None:
@@ -126,23 +206,26 @@ class RoboRoach:
     async def configure(
         self,
         *,
-        frequency_hz: int = 55,
-        pulse_width_ms: int = 5,
-        duration_ms: int = 500,
-        gain_percent: int = 50,
+        frequency_hz: int = 10,
+        pulse_width_ms: int = 1,
+        duration_ms: int = 250,
+        gain_percent: int = 10,
         random_mode: bool = False,
     ) -> None:
-        """Set conservative values within the published backpack ranges."""
-        if not 1 <= frequency_hz <= 150:
-            raise ValueError("frequency_hz must be from 1 to 150")
-        if not 1 <= pulse_width_ms <= 255:
-            raise ValueError("pulse_width_ms must be from 1 to 255")
+        """Set values inside the living-animal waveform envelope."""
+        if not 1 <= frequency_hz <= MAX_FREQUENCY_HZ:
+            raise ValueError(f"frequency_hz must be from 1 to {MAX_FREQUENCY_HZ}")
+        if not 1 <= pulse_width_ms <= MAX_PULSE_WIDTH_MS:
+            raise ValueError(f"pulse_width_ms must be from 1 to {MAX_PULSE_WIDTH_MS}")
         if pulse_width_ms * frequency_hz > 500:
             raise ValueError("pulse width must keep duty cycle at or below 50%")
-        if not 10 <= duration_ms <= 1000 or duration_ms % 5:
-            raise ValueError("duration_ms must be 10..1000 in 5 ms increments")
-        if not 0 <= gain_percent <= 100:
-            raise ValueError("gain_percent must be from 0 to 100")
+        if not MIN_DURATION_MS <= duration_ms <= MAX_DURATION_MS or duration_ms % 5:
+            raise ValueError(
+                f"duration_ms must be {MIN_DURATION_MS}..{MAX_DURATION_MS} "
+                "in 5 ms increments"
+            )
+        if not 0 <= gain_percent <= MAX_GAIN_PERCENT:
+            raise ValueError(f"gain_percent must be from 0 to {MAX_GAIN_PERCENT}")
 
         client = self._connected_client()
         values = (
@@ -154,13 +237,14 @@ class RoboRoach:
         )
         for uuid, value in values:
             await client.write_gatt_char(uuid, bytes([value]), response=True)
+        self._duration_ms = duration_ms
 
     async def turn(self, direction: Literal["left", "right"]) -> None:
         """Request one firmware-timed left or right turn stimulus."""
+        guard_turn(self._duration_ms)
         uuid = TURN_LEFT_UUID if direction == "left" else TURN_RIGHT_UUID
-        await self._connected_client().write_gatt_char(
-            uuid, b"\x01", response=True
-        )
+        await self._connected_client().write_gatt_char(uuid, b"\x01", response=True)
+        record_turn(self._duration_ms)
 
     async def turn_left(self) -> None:
         await self.turn("left")
@@ -219,7 +303,10 @@ async def run_command(args: argparse.Namespace) -> None:
         elif args.command == "session":
             await interactive_session(roach)
         else:
-            await roach.turn(args.command)
+            try:
+                await roach.turn(args.command)
+            except RuntimeError as exc:
+                raise SystemExit(str(exc))
             print(f"Sent one {args.command} command")
 
 
@@ -234,7 +321,11 @@ async def interactive_session(roach: RoboRoach) -> None:
             if command in {"quit", "exit", "q"}:
                 return
             if command in {"left", "right"}:
-                await roach.turn(command)
+                try:
+                    await roach.turn(command)
+                except RuntimeError as exc:
+                    print(exc)
+                    continue
                 print(f"Sent one {command} command")
                 continue
             if command == "info":
@@ -250,9 +341,7 @@ async def interactive_session(roach: RoboRoach) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "command", choices=("scan", "info", "left", "right", "session")
-    )
+    parser.add_argument("command", choices=("scan", "info", "left", "right", "session"))
     parser.add_argument("--timeout", type=float, default=10.0)
     args = parser.parse_args()
     asyncio.run(run_command(args))
