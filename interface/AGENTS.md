@@ -4,13 +4,17 @@ These instructions apply to every file under `interface/`.
 
 ## Purpose and scope
 
-Maintain a small, auditable Python BLE interface for the Backyard Brains
-RoboRoach backpack. Keep hardware control here; put experiment analysis,
-tracking, notebooks, and datasets elsewhere in the repository.
+Maintain the hardware interface for the Backyard Brains RoboRoach: the BLE
+backpack and the iPhone or webcam pose stream. Keep stimulation and camera
+capture here. Put RL policy, teaching loops, notebooks, and datasets in
+rl_control or elsewhere.
 
-The public API is `RoboRoach` and `StimulationSettings` from `interface`.
-Preserve the command-line entry point in `interface/roboroach.py` unless a
-replacement and migration instructions are added in the same change.
+The public API is RoboRoach, StimulationSettings, Pose, PoseTracker,
+SimulatedCamera, and KeyboardCamera from interface. PhonePoseTracker lives
+in interface/track.py and must not be imported by interface/__init__.py.
+Preserve the command-line entry points in interface/roboroach.py and
+interface/track.py unless a replacement and migration instructions are
+added in the same change.
 
 ## Protocol invariants
 
@@ -28,7 +32,7 @@ replacement and migration instructions are added in the same change.
 ## Safety constraints
 
 - Importing the package, connecting, scanning, reading information, and
-  starting a session must never stimulate an antenna.
+  starting a session must never stimulate an antenna or open a camera.
 - Tests must use mocks or fakes. Never make a hardware stimulation command part
   of an automated test, startup hook, retry, heartbeat, or cleanup path.
 - A user action may produce at most one turn pulse unless the user explicitly
@@ -63,12 +67,14 @@ replacement and migration instructions are added in the same change.
 
 For every code change:
 
-1. Run `python -m py_compile interface/roboroach.py interface/__init__.py`.
-2. Run `git diff --check`.
+1. Run python -m py_compile on interface/roboroach.py, interface/camera.py,
+   and interface/__init__.py. Also compile interface/track.py and
+   interface/plot.py when those files change.
+2. Run git diff --check.
 3. Test GATT reads and writes with a fake client, including exact UUID, byte
-   value, units, and `response=True` behavior.
+   value, units, and response=True behavior.
 4. If hardware verification is explicitly authorized, progress through
-   `scan`, then `info`, then at most one requested direction command. Report
+   scan, then info, then at most one requested direction command. Report
    separately whether BLE accepted the write and whether an animal visibly
    responded.
 

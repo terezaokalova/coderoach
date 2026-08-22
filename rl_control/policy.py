@@ -6,8 +6,8 @@ import math
 import random
 from typing import Protocol
 
-from .camera import MovementState
 from .env import (
+    MovementState,
     Observation,
     StimAction,
     clamp_duty,
@@ -269,3 +269,34 @@ def make_teach_policy(name: str, direction: str = "left"):
     if name == "bandit":
         return NoveltyBandit(direction=direction)
     raise ValueError("policy must be static, irregular, or bandit")
+
+
+def status_text(policy) -> str:
+    inner = policy.inner if isinstance(policy, PathPolicy) else policy
+    if isinstance(inner, NoveltyBandit):
+        rows = [
+            f"bandit  eps {inner.epsilon:.2f}  a {inner.alpha:.2f}",
+            f"repeat pen {inner.repeat_penalty:.2f}",
+        ]
+        for i, (action, q) in enumerate(zip(inner.actions, inner.q)):
+            mark = "*" if i == inner._last else " "
+            rows.append(
+                f"{mark}{action.frequency_hz:2d} Hz {action.duration_ms:3d} ms  "
+                f"Q {q:+.2f}"
+            )
+        return "\n".join(rows)
+    if isinstance(inner, IrregularPulsePolicy):
+        nxt = inner.pairs[inner._i % len(inner.pairs)]
+        return (
+            f"irregular  idx {inner._i % len(inner.pairs)}/{len(inner.pairs)}\n"
+            f"next {nxt[0]} Hz  {nxt[1]} ms"
+        )
+    if isinstance(inner, StaticPulsePolicy):
+        action = inner.action
+        return (
+            f"static  {action.frequency_hz} Hz  {action.duration_ms} ms  "
+            f"{action.direction}"
+        )
+    if policy is None:
+        return ""
+    return type(inner).__name__

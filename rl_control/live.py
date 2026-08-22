@@ -8,9 +8,11 @@ import math
 from contextlib import suppress
 
 from interface import RoboRoach
+from interface.plot import make_live_plot, run_with_dashboard
+from interface.track import open_camera
 
 from .env import SimWorld, StimAction, format_step
-from .policy import HeadingPolicy, make_teach_policy
+from .policy import HeadingPolicy, make_teach_policy, status_text
 from .teach import (
     AntiHabituationEnv,
     format_reversal_step,
@@ -20,6 +22,21 @@ from .teach import (
     summarize_reversal,
     teach,
 )
+
+
+class BackpackStim:
+    def __init__(self, roach: RoboRoach, cooldown: float) -> None:
+        self.roach = roach
+        self.cooldown = cooldown
+
+    async def pulse(self, action: StimAction) -> None:
+        await self.roach.configure(
+            frequency_hz=action.frequency_hz,
+            pulse_width_ms=action.pulse_width_ms,
+            duration_ms=action.duration_ms,
+        )
+        await self.roach.turn(action.direction)
+        await asyncio.sleep(self.cooldown)
 
 
 async def run_live(args: argparse.Namespace) -> None:
@@ -60,26 +77,13 @@ async def run_live(args: argparse.Namespace) -> None:
                 await keepalive
 
 
-class BackpackStim:
-    def __init__(self, roach: RoboRoach, cooldown: float) -> None:
-        self.roach = roach
-        self.cooldown = cooldown
-
-    async def pulse(self, action: StimAction) -> None:
-        await self.roach.configure(
-            frequency_hz=action.frequency_hz,
-            pulse_width_ms=action.pulse_width_ms,
-            duration_ms=action.duration_ms,
-        )
-        await self.roach.turn(action.direction)
-        await asyncio.sleep(self.cooldown)
-
-
 async def run_live_teach(args: argparse.Namespace) -> None:
     if args.compare:
         raise SystemExit("compare is simulation-only")
+    tracker = open_camera(args)
+    pose = "camera" if tracker is not None else "sim"
     print(
-        f"Live teach: stim on backpack, pose from sim (no camera). "
+        f"Live teach: stim on backpack, pose from {pose}. "
         f"At most {args.max_steps} pulses, {args.cooldown:.0f} s apart."
     )
     policy = make_teach_policy(args.policy, direction=args.direction)
@@ -89,18 +93,25 @@ async def run_live_teach(args: argparse.Namespace) -> None:
             env = AntiHabituationEnv.wired(
                 BackpackStim(roach, args.cooldown),
                 direction=args.direction,
+                tracker=tracker,
             )
             plot = None
             if not args.no_plot:
-                from .plot import LiveRunPlot
+                plot = make_live_plot(
+                    f"{args.policy}  state={pose}  stim=backpack",
+                    tracker,
+                    extra=lambda: status_text(policy),
+                )
 
-                plot = LiveRunPlot(f"{args.policy}  state=sim  stim=backpack")
-            logs = await teach(
-                env,
-                policy,
-                max_steps=args.max_steps,
-                on_step=None if plot is None else plot.update,
-            )
+            async def work():
+                return await teach(
+                    env,
+                    policy,
+                    max_steps=args.max_steps,
+                    on_step=None if plot is None else plot.update,
+                )
+
+            logs = await run_with_dashboard(plot, tracker, work)
             for log in logs:
                 print(format_teach_step(log))
             print(summarize(logs))
@@ -114,37 +125,49 @@ async def run_live_teach(args: argparse.Namespace) -> None:
             keepalive.cancel()
             with suppress(asyncio.CancelledError):
                 await keepalive
+            if tracker is not None:
+                tracker.stop()
 
 
 async def run_live_reversal(args: argparse.Namespace) -> None:
+    tracker = open_camera(args)
+    pose = "camera" if tracker is not None else "sim"
     print(
         f"Live reversal: 180 left then 180 right. "
-        f"Stim on backpack, pose from sim (no camera). "
+        f"Stim on backpack, pose from {pose}. "
         f"At most {args.max_steps} pulses, {args.cooldown:.0f} s apart."
     )
     policy = make_teach_policy(args.policy, direction="left")
     async with RoboRoach(scan_timeout=args.timeout) as roach:
         keepalive = asyncio.create_task(roach.keep_alive())
         try:
-            env = AntiHabituationEnv.wired(BackpackStim(roach, args.cooldown))
+            env = AntiHabituationEnv.wired(
+                BackpackStim(roach, args.cooldown),
+                tracker=tracker,
+            )
             env.max_still = 8
             plot = None
             if not args.no_plot:
-                from .plot import LiveRunPlot
-
-                plot = LiveRunPlot(f"{args.policy}  reversal  stim=backpack")
+                plot = make_live_plot(
+                    f"{args.policy}  reversal  state={pose}  stim=backpack",
+                    tracker,
+                    extra=lambda: status_text(policy),
+                )
 
             def on_step(log, progress: dict[str, float]) -> None:
                 if plot is not None:
                     plot.update(log)
                 print(format_reversal_step(log, progress))
 
-            logs, progress, success = await reversal(
-                env,
-                policy,
-                max_steps=args.max_steps,
-                on_step=on_step,
-            )
+            async def work():
+                return await reversal(
+                    env,
+                    policy,
+                    max_steps=args.max_steps,
+                    on_step=on_step,
+                )
+
+            logs, progress, success = await run_with_dashboard(plot, tracker, work)
             print(summarize_reversal(logs, progress, success))
             if plot is not None:
                 plot.hold()
@@ -156,3 +179,5 @@ async def run_live_reversal(args: argparse.Namespace) -> None:
             keepalive.cancel()
             with suppress(asyncio.CancelledError):
                 await keepalive
+            if tracker is not None:
+                tracker.stop()
