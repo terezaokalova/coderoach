@@ -1,0 +1,9 @@
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+# interface/ is governed by interface/AGENTS.md, which defines its own
+# verification steps and forbids incidental edits to the protocol code.
+# Formatting it here would rewrite roboroach.py, including turn().
+extend-exclude = ["interface"]

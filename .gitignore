@@ -1,1 +1,8 @@
+<<<<<<< HEAD
 __pycache__
+=======
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+>>>>>>> e9db64d (Add refractory-enforced stimulation gate)

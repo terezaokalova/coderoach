@@ -17,5 +17,7 @@ dependencies:
   - jupyterlab
   - pyyaml
   - black
+  - ruff
+  - pytest
   - pip:
       - bleak>=1.1,<4
