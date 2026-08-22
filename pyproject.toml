@@ -1,9 +1,11 @@
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 
 [tool.ruff]
 # interface/ is governed by interface/AGENTS.md, which defines its own
-# verification steps and forbids incidental edits to the protocol code.
-# Formatting it here would rewrite roboroach.py, including turn().
-extend-exclude = ["interface"]
+# verification steps. rl_control/ belongs to another author who is actively
+# pushing to it. Reformatting either from here rewrites code we do not own
+# and manufactures merge conflicts. Drop an entry once its owner opts in.
+extend-exclude = ["interface", "rl_control"]
+src = ["src"]
