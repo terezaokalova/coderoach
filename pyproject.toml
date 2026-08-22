@@ -1,6 +1,8 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+[tool.pytest.ini_options]
+pythonpath = ["src"]
 
 [tool.ruff]
 # interface/ is governed by interface/AGENTS.md, which defines its own
