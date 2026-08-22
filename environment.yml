@@ -15,4 +15,5 @@ dependencies:
   - scipy
   - ipykernel
   - jupyterlab
+  - pyyaml
   - black

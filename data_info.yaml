@@ -1,0 +1,57 @@
+base_url: https://pub-8b7715bb28444713b1c917d7c4661390.r2.dev/recordings
+dashboard: https://axoneuro.dev/dashboard
+default_session: SD11_rec_20260820_182553.zarr
+note: >
+  Public zarrs are raw broadband only. derived/spikes.npz, pose, and LFP 404 on
+  every store we opened. Close pairs keep the later take.
+
+subjects:
+  SD10:
+    device: AIO_1
+    recs: 6
+    good_ch: 32/32
+    why: 4-channel AIO
+    sessions:
+      - {date: 2026-08-17, time: "15:19", use: false, id: SD10_rec_20260817_151920.zarr, note: grounding changed near end, derived: false}
+      - {date: 2026-08-17, time: "15:14", use: true, id: SD10_rec_20260817_151404.zarr, derived: false}
+      - {date: 2026-08-12, time: "16:17", use: true, id: SD10_rec_20260812_161700.zarr, derived: false}
+      - {date: 2026-08-12, time: "16:14", use: false, id: SD10_rec_20260812_161402.zarr, note: false start, derived: false}
+      - {date: 2026-08-11, time: "23:06", use: true, id: null, note: not on public prefix}
+      - {date: 2026-08-11, time: "15:14", use: true, id: SD10_rec_20260811_151454.zarr, derived: false}
+
+  SD11:
+    device: AIO_1
+    recs: 3
+    good_ch: 26/32
+    why: 4-channel AIO
+    sessions:
+      - {date: 2026-08-20, time: "18:25", use: true, id: SD11_rec_20260820_182553.zarr, derived: false}
+      - {date: 2026-08-20, time: "18:23", use: false, id: SD11_rec_20260820_182314.zarr, note: restart, derived: false}
+      - {date: 2026-08-17, time: "15:35", use: false, id: SD11_rec_20260817_153507.zarr, note: grounding fell off, derived: false}
+
+  RNU006:
+    device: V1.6
+    recs: 7
+    good_ch: 26/32
+    why: only healthy 32-channel behaving animal
+    sessions:
+      - {date: 2026-07-21, time: "15:21", use: true, id: RNU006_rec_20260721_152157.zarr, derived: false}
+      - {date: 2026-07-05, time: "11:33", use: true, id: RNU006_rec_20260705_113351.zarr, note: headstage0 rest, derived: false}
+      - {date: 2026-07-03, time: "14:47", use: true, id: RNU006_rec_20260703_144712.zarr, note: headstage0 rest, derived: false}
+      - {date: 2026-07-02, time: "14:10", use: true, id: null, note: official with video, not on public prefix}
+      - {date: 2026-07-02, time: "14:09", use: false, id: RNU006_rec_20260702_140959.zarr, note: 1 min before official, derived: false}
+      - {date: 2026-06-30, time: "13:27", use: true, id: null, note: not on public prefix}
+      - {date: 2026-06-23, time: "15:18", use: false, note: implant day}
+
+  in-vitro:
+    device: v1.5
+    recs: 6
+    good_ch: 32/32
+    why: 32-channel ephys only
+    sessions:
+      - {date: 2026-08-05, time: "18:29", use: false, id: in-vitro_rec_20260805_182906.zarr, note: no sync, derived: false}
+      - {date: 2026-08-05, time: "18:20", use: false, id: in-vitro_rec_20260805_182034.zarr, note: stim, derived: false}
+      - {date: 2026-08-05, time: "18:16", use: false, id: in-vitro_rec_20260805_181610.zarr, note: stim, derived: false}
+      - {date: 2026-08-05, time: "18:04", use: false, id: in-vitro_rec_20260805_180444.zarr, note: grounding in well, derived: false}
+      - {date: 2026-08-05, time: "17:51", use: true, id: in-vitro_rec_20260805_175113.zarr, derived: false}
+      - {date: 2026-07-07, use: false, id: in-vitro_2026-07-07.zarr, note: 750 uA stim, derived: false}
