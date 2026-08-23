@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import math
+from pathlib import Path
 
 from .env import SimWorld, StimAction, format_step
 from .policy import HeadingPolicy, PathPolicy, make_teach_policy, status_text
@@ -51,6 +52,98 @@ def add_camera_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+TRAJ_ARGS = (
+    ("traj_camera", "--traj-camera"),
+    ("traj_hsv", "--traj-hsv"),
+    ("traj_arena", "--traj-arena"),
+    ("traj_min_area", "--traj-min-area"),
+    ("traj_sigma_p", "--traj-sigma-p"),
+    ("traj_sigma_a", "--traj-sigma-a"),
+    ("traj_v_min", "--traj-v-min"),
+)
+
+
+def add_gate_args(parser: argparse.ArgumentParser) -> None:
+    """What StimGate needs and has no default for."""
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        help="directory for the gate log; required with --live",
+    )
+    parser.add_argument(
+        "--gain-percent",
+        type=int,
+        default=10,
+        help="stimulation gain; 10 matches the RoboRoach.configure() default "
+        "this path used before the gate (default: 10)",
+    )
+
+
+def add_pose_args(parser: argparse.ArgumentParser) -> None:
+    """Choose the pose source. --tracker is already taken by blob/csrt."""
+    parser.add_argument(
+        "--pose-source",
+        choices=("sim", "camera"),
+        default="sim",
+        help="sim keeps the simulated animal; camera reads pose from the "
+        "src/traj overhead tracker (default: sim)",
+    )
+    parser.add_argument(
+        "--still-speed",
+        type=float,
+        default=None,
+        help="displacement between consecutive poses below which the animal "
+        "counts as still, in whatever units the pose source reports -- "
+        "simulated animal walks ~0.09 per step, the src/traj tracker reports "
+        "centimetres. Despite the name it is compared against per-step "
+        "displacement, not speed. Default: 0.01 with a camera, 0.02 with the "
+        "simulated animal",
+    )
+    parser.add_argument("--traj-camera", type=int, help="camera index")
+    parser.add_argument("--traj-hsv", type=Path, help="HSV bounds JSON")
+    parser.add_argument("--traj-arena", type=Path, help="arena homography JSON")
+    parser.add_argument("--traj-min-area", type=float, help="min contour area, px^2")
+    parser.add_argument("--traj-sigma-p", type=float, help="centroid noise, cm")
+    parser.add_argument("--traj-sigma-a", type=float, help="process noise, cm/s^2")
+    parser.add_argument("--traj-v-min", type=float, help="heading cutoff speed, cm/s")
+
+
+def open_traj_tracker(args: argparse.Namespace):
+    """Build src/traj's AsyncPoseTracker from the --traj-* arguments.
+
+    TrackerConfig gives none of these a default on purpose: each is a property
+    of one physical setup, and a default would be a guess that looks like a
+    measurement. So every one is required here too, reported together rather
+    than one per run.
+    """
+    try:
+        from traj.track import AsyncPoseTracker, HsvBounds, TrackerConfig
+    except ImportError as exc:  # pragma: no cover - depends on sys.path
+        raise SystemExit(
+            f"--pose-source camera needs src/ on the path: {exc}. "
+            "Run with PYTHONPATH=src."
+        ) from exc
+
+    missing = [flag for name, flag in TRAJ_ARGS if getattr(args, name) is None]
+    if args.run_dir is None:
+        missing.append("--run-dir")
+    if missing:
+        raise SystemExit(f"--pose-source camera needs {' '.join(missing)}")
+
+    return AsyncPoseTracker(
+        TrackerConfig(
+            camera_index=args.traj_camera,
+            hsv_bounds=HsvBounds.from_json(args.traj_hsv),
+            min_contour_area=args.traj_min_area,
+            sigma_p_cm=args.traj_sigma_p,
+            sigma_a_cm_s2=args.traj_sigma_a,
+            v_min_cm_s=args.traj_v_min,
+            arena_calibration=args.traj_arena,
+            run_dir=args.run_dir,
+        )
+    )
+
+
 def parse_waypoint(text: str) -> tuple[float, float]:
     parts = text.split(",")
     if len(parts) != 2:
@@ -83,7 +176,9 @@ async def run_teach_sim(args: argparse.Namespace) -> None:
 
         plot = LiveRunPlot(names[0])
     for name in names:
-        env = AntiHabituationEnv.simulated(direction=args.direction)
+        env = AntiHabituationEnv.simulated(
+            direction=args.direction, still_speed=args.still_speed
+        )
         policy = make_teach_policy(name, direction=args.direction)
         if plot is not None:
             plot.extra = lambda current=policy: status_text(current)
@@ -109,7 +204,7 @@ async def run_reversal_sim(args: argparse.Namespace) -> None:
         from interface.plot import LiveRunPlot
 
         plot = LiveRunPlot(args.policy)
-    env = AntiHabituationEnv.simulated()
+    env = AntiHabituationEnv.simulated(still_speed=args.still_speed)
     env.max_still = 8
     policy = make_teach_policy(args.policy, direction="left")
     if plot is not None:
@@ -138,7 +233,12 @@ async def run_camera_teach(args: argparse.Namespace) -> None:
     from interface.plot import make_live_plot, run_with_dashboard
     from interface.track import open_camera
 
-    tracker = open_camera(args)
+    traj = args.pose_source == "camera"
+    if traj:
+        tracker = open_traj_tracker(args)
+        await tracker.start()
+    else:
+        tracker = open_camera(args)
     if tracker is None:
         raise SystemExit("camera teach needs the phone stream, not --sim-pose")
     policy = make_teach_policy(args.policy, direction=args.direction)
@@ -146,10 +246,11 @@ async def run_camera_teach(args: argparse.Namespace) -> None:
         PauseStim(args.cooldown),
         direction=args.direction,
         tracker=tracker,
+        still_speed=args.still_speed,
     )
     env.max_still = 0
     plot = None
-    if not args.no_plot:
+    if not args.no_plot and not traj:
         plot = make_live_plot(
             f"{args.policy}  state=camera  stim=silent",
             tracker,
@@ -229,6 +330,8 @@ def main() -> None:
     teach_p.add_argument("--cooldown", type=float, default=2.0)
     teach_p.add_argument("--timeout", type=float, default=10.0)
     add_camera_args(teach_p)
+    add_gate_args(teach_p)
+    add_pose_args(teach_p)
 
     rev_p = sub.add_parser(
         "reversal",
@@ -245,6 +348,8 @@ def main() -> None:
     rev_p.add_argument("--cooldown", type=float, default=2.0)
     rev_p.add_argument("--timeout", type=float, default=10.0)
     add_camera_args(rev_p)
+    add_gate_args(rev_p)
+    add_pose_args(rev_p)
 
     goal_p = sub.add_parser("goal", help="heading correction toward a point")
     goal_p.add_argument("--live", action="store_true")
@@ -257,6 +362,7 @@ def main() -> None:
     goal_p.add_argument("--start-heading", type=float, default=0.0)
     goal_p.add_argument("--goal-x", type=float, default=1.0)
     goal_p.add_argument("--goal-y", type=float, default=0.4)
+    add_gate_args(goal_p)
 
     path_p = sub.add_parser(
         "path",
@@ -278,6 +384,14 @@ def main() -> None:
     path_p.add_argument("--arrive", type=float, default=0.12)
 
     args = parser.parse_args()
+    if getattr(args, "live", False) and args.run_dir is None:
+        # StimGate writes its log here and has no default. Failing now beats
+        # failing after the backpack has already connected.
+        raise SystemExit(f"{args.command} --live needs --run-dir")
+    if getattr(args, "pose_source", "sim") == "camera" and not (
+        getattr(args, "live", False) or getattr(args, "camera", False)
+    ):
+        raise SystemExit("--pose-source camera needs --live or --camera")
     if args.command == "teach" and args.camera:
         asyncio.run(run_camera_teach(args))
         return

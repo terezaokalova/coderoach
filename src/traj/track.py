@@ -876,6 +876,20 @@ class AsyncPoseTracker:
             self._task = None
         self._tracker.close()
 
+    def stop(self) -> None:
+        """Synchronous shutdown, for ``rl_control``'s non-async cleanup paths.
+
+        ``interface.plot.run_with_dashboard`` and ``rl_control.live`` both close
+        a tracker with a bare ``tracker.stop()`` inside a ``finally``, where
+        there is no loop to await on. Cancelling the pump without awaiting it is
+        enough here: the task owns no resource of its own, and the capture is
+        released on this line rather than by the task.
+        """
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+        self._tracker.close()
+
 
 # --------------------------------------------------------------------------
 # demo entry point
