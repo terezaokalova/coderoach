@@ -19,6 +19,7 @@ from models.pose_dataset import (
 )
 from models.pose_decoder import PoseDecoder, masked_smooth_l1
 from models.preprocess import cache_path
+from models.train_pose_decoder import evaluate
 
 
 def _synthetic_session(
@@ -287,6 +288,42 @@ def test_decoder_shapes_loss_and_checkpoint(tmp_path: Path):
     pred_s = strided(neural, pose_bin_idx, pose_valid)
     assert pred_s.shape == (4, 8, 15, 2)
     assert strided.time_stride == 8
+
+
+def test_evaluate_concat_variable_pose_counts():
+    model = PoseDecoder(
+        in_channels=32,
+        hidden_channels=8,
+        kernel_size=3,
+        stride=1,
+        n_layers=1,
+        n_keypoints=15,
+        coords=2,
+    )
+    batches = [
+        {
+            "neural": torch.randn(2, 20, 32),
+            "pose": torch.rand(2, 20, 15, 2),
+            "pose_mask": torch.ones(2, 20, 15),
+            "pose_valid": torch.ones(2, 20, dtype=torch.bool),
+            "pose_bin_idx": torch.randint(0, 20, (2, 20)),
+        },
+        {
+            "neural": torch.randn(1, 20, 32),
+            "pose": torch.rand(1, 19, 15, 2),
+            "pose_mask": torch.ones(1, 19, 15),
+            "pose_valid": torch.ones(1, 19, dtype=torch.bool),
+            "pose_bin_idx": torch.randint(0, 20, (1, 19)),
+        },
+    ]
+    metrics = evaluate(
+        model,
+        batches,
+        torch.device("cpu"),
+        frame_width=1280.0,
+        frame_height=1024.0,
+    )
+    assert np.isfinite(metrics["rmse_px"])
 
 
 def test_ndt3_decoder_shapes_and_weight_map(tmp_path: Path):

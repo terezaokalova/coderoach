@@ -46,6 +46,22 @@ def pick_device(name: str) -> torch.device:
     return torch.device(name)
 
 
+def _cat_variable_pose(chunks: list[torch.Tensor]) -> torch.Tensor:
+    """Cat on batch dim 0 after padding pose dim 1 to a shared length."""
+    max_p = max(t.shape[1] for t in chunks)
+    padded = []
+    for t in chunks:
+        if t.shape[1] == max_p:
+            padded.append(t)
+            continue
+        shape = list(t.shape)
+        shape[1] = max_p
+        out = t.new_zeros(shape)
+        out[:, : t.shape[1]] = t
+        padded.append(out)
+    return torch.cat(padded, dim=0)
+
+
 @torch.no_grad()
 def evaluate(
     model: PoseDecoder,
@@ -76,10 +92,10 @@ def evaluate(
         valids.append(pose_valid.cpu())
     if not preds:
         return {"loss": float("nan"), "rmse_px": float("nan")}
-    pred_all = torch.cat(preds)
-    target_all = torch.cat(targets)
-    mask_all = torch.cat(masks)
-    valid_all = torch.cat(valids)
+    pred_all = _cat_variable_pose(preds)
+    target_all = _cat_variable_pose(targets)
+    mask_all = _cat_variable_pose(masks)
+    valid_all = _cat_variable_pose(valids)
     metrics = masked_pixel_rmse(
         pred_all,
         target_all,
@@ -140,10 +156,10 @@ def mean_pose_baseline(
         masks.append(pose_mask)
         valids.append(pose_valid)
     return masked_pixel_rmse(
-        torch.cat(preds),
-        torch.cat(targets),
-        torch.cat(masks),
-        torch.cat(valids),
+        _cat_variable_pose(preds),
+        _cat_variable_pose(targets),
+        _cat_variable_pose(masks),
+        _cat_variable_pose(valids),
         frame_width=frame_width,
         frame_height=frame_height,
     )
