@@ -14,12 +14,13 @@ from models.pose_dataset import (
     PoseSequenceDataset,
     SessionArrays,
     collate_pose_batch,
+    session_ranges,
     temporal_ranges,
     window_starts_in_range,
 )
 from models.pose_decoder import PoseDecoder, masked_smooth_l1
 from models.preprocess import cache_path
-from models.train_pose_decoder import evaluate
+from models.train_pose_decoder import evaluate, train_mean_pose
 
 
 def _synthetic_session(
@@ -143,6 +144,74 @@ def test_session_protocol_val_is_temporal_not_recording():
     assert max(train_starts) < min(val_starts)
 
 
+def test_session_protocol_splits_test_session_in_half():
+    train_sess = _synthetic_session(session="train.zarr", n_bins=4000, n_pose=400)
+    test_sess = _synthetic_session(session="test.zarr", n_bins=4000, n_pose=400)
+    train_sess.pose_xy[:] = 0.1
+    train_sess.pose_mask[:] = True
+    test_sess.pose_xy[test_sess.pose_t_s >= 40.0] = 0.9
+    test_sess.pose_xy[test_sess.pose_t_s < 40.0] = 0.1
+    test_sess.pose_mask[:] = True
+    split = SplitConfig(
+        protocol="session",
+        train_frac=0.85,
+        val_frac=0.15,
+        test_frac=0.0,
+        guard_s=2.0,
+        train_sessions=(train_sess.session,),
+        val_sessions=(),
+        test_sessions=(test_sess.session,),
+    )
+    ranges = session_ranges(80.0, split, is_test_session=True)
+    assert ranges["train"].end_s <= 40.0
+    assert ranges["val"].end_s <= 40.0
+    assert ranges["test"].start_s >= 40.0
+    train_ds = PoseSequenceDataset(
+        [train_sess, test_sess],
+        window_s=2.0,
+        bin_ms=20.0,
+        split_name="train",
+        split_cfg=split,
+    )
+    val_ds = PoseSequenceDataset(
+        [train_sess, test_sess],
+        window_s=2.0,
+        bin_ms=20.0,
+        split_name="val",
+        split_cfg=split,
+        neural_mean=train_ds.neural_mean,
+        neural_std=train_ds.neural_std,
+    )
+    test_ds = PoseSequenceDataset(
+        [test_sess],
+        window_s=2.0,
+        bin_ms=20.0,
+        split_name="test",
+        split_cfg=split,
+        neural_mean=train_ds.neural_mean,
+        neural_std=train_ds.neural_std,
+    )
+    dt = 0.02
+    window_s = 2.0
+
+    def _window_times(ds: PoseSequenceDataset, session: str) -> list[tuple[float, float]]:
+        out = []
+        for si, start in ds.items:
+            if ds.sessions[si].session != session:
+                continue
+            out.append((start * dt, start * dt + window_s))
+        return out
+
+    train_times = _window_times(train_ds, "test.zarr")
+    val_times = _window_times(val_ds, "test.zarr")
+    test_times = _window_times(test_ds, "test.zarr")
+    assert train_times and val_times and test_times
+    assert max(end for _, end in train_times + val_times) <= 40.0
+    assert min(start for start, _ in test_times) >= 40.0
+    mean = train_mean_pose(train_ds)
+    assert float(mean.mean()) < 0.3
+
+
 def test_temporal_ranges_have_guards():
     split = SplitConfig(
         protocol="temporal",
@@ -194,13 +263,13 @@ def test_dataset_returns_aligned_tensors():
     sess = _synthetic_session()
     split = SplitConfig(
         protocol="session",
-        train_frac=0.7,
+        train_frac=0.85,
         val_frac=0.15,
-        test_frac=0.15,
+        test_frac=0.0,
         guard_s=2.0,
         train_sessions=("synth.zarr",),
-        val_sessions=("synth.zarr",),
-        test_sessions=("synth.zarr",),
+        val_sessions=(),
+        test_sessions=("other.zarr",),
     )
     ds = PoseSequenceDataset(
         [sess],

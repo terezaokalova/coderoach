@@ -3,7 +3,7 @@ data:
   sessions:
     - SD11_rec_20260817_153507.zarr
     - SD11_rec_20260820_182314.zarr
-    - SD11_rec_20260820_182553.zarr  # final: held out for test
+    - SD11_rec_20260820_182553.zarr  # first half train/val, second half test
   camera: cam0
   frame_width: 1280
   frame_height: 1024
@@ -14,7 +14,8 @@ data:
 
 split:
   protocol: session  # temporal | session
-  # Within train_sessions: chronological train/val. Test is a whole recording.
+  # Pool sessions: chronological train/val. Test session: first half train/val,
+  # second half fully held-out test.
   train_frac: 0.85
   val_frac: 0.15
   test_frac: 0.0
@@ -22,7 +23,7 @@ split:
   train_sessions:
     - SD11_rec_20260817_153507.zarr
     - SD11_rec_20260820_182314.zarr
-  val_sessions: []  # unused; val is a later time block inside train_sessions
+  val_sessions: []  # unused; val is a later time block in pool + test first half
   test_sessions:
     - SD11_rec_20260820_182553.zarr
 

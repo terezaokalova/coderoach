@@ -131,7 +131,7 @@ def temporal_ranges(
 ) -> dict[str, TimeRange]:
     """Chronological blocks with guard gaps.
 
-    If test_frac is 0, returns only train and val (for session-held-out test).
+    If test_frac is 0, returns only train and val.
     """
     guard = split.guard_s
     if split.test_frac <= 0:
@@ -155,6 +155,24 @@ def temporal_ranges(
         "val": TimeRange(train_end + guard, val_end),
         "test": TimeRange(test_start, duration_s - guard),
     }
+
+
+def session_ranges(
+    duration_s: float,
+    split: SplitConfig,
+    *,
+    is_test_session: bool,
+) -> dict[str, TimeRange]:
+    """Train-pool sessions are chronological train/val.
+
+    Test sessions use the first half for train/val and the second half for test.
+    """
+    if not is_test_session:
+        return temporal_ranges(duration_s, split)
+    half = 0.5 * duration_s
+    ranges = temporal_ranges(half, split)
+    ranges["test"] = TimeRange(half + split.guard_s, duration_s - split.guard_s)
+    return ranges
 
 
 def window_starts_in_range(
@@ -202,14 +220,17 @@ class PoseSequenceDataset(Dataset):
             duration_s = float(sess.counts.shape[0] * bin_ms / 1000.0)
             if split_cfg.protocol == "temporal":
                 ranges = temporal_ranges(duration_s, split_cfg)
-                tr = ranges[split_name]
-            elif split_cfg.protocol == "session" and split_name in {"train", "val"}:
-                # Val is a later time block inside the train-pool recordings.
-                ranges = temporal_ranges(duration_s, split_cfg)
-                tr = ranges[split_name]
+            elif split_cfg.protocol == "session":
+                ranges = session_ranges(
+                    duration_s,
+                    split_cfg,
+                    is_test_session=sess.session in split_cfg.test_sessions,
+                )
             else:
-                # Session protocol test: use the full held-out recording.
-                tr = None
+                raise ValueError(f"unknown protocol {split_cfg.protocol!r}")
+            tr = ranges.get(split_name)
+            if tr is None:
+                continue
             starts = window_starts_in_range(
                 n_bins=sess.counts.shape[0],
                 window_bins=self.window_bins,
@@ -367,9 +388,8 @@ def build_split_datasets(
     def load_many(ids: tuple[str, ...]) -> list[SessionArrays]:
         return [load_session_arrays(cfg, sid) for sid in ids]
 
-    # Train pool = train_sessions (+ optional val_sessions as extra pool).
-    # Within each pool session, train/val are chronological blocks.
-    # Test = whole held-out recording(s).
+    # Train pool = train_sessions (+ optional val_sessions).
+    # Test sessions: first half joins train/val; second half is held-out test.
     pool_ids = tuple(
         dict.fromkeys([*split_cfg.train_sessions, *split_cfg.val_sessions])
     )
@@ -377,7 +397,7 @@ def build_split_datasets(
         raise ValueError("session protocol needs train_sessions (and/or val_sessions)")
     if not split_cfg.test_sessions:
         raise ValueError(
-            "session protocol needs test_sessions for the held-out recording"
+            "session protocol needs test_sessions for the half-session holdout"
         )
     overlap = set(pool_ids) & set(split_cfg.test_sessions)
     if overlap:
@@ -387,8 +407,9 @@ def build_split_datasets(
 
     pool_arrays = load_many(pool_ids)
     test_arrays = load_many(split_cfg.test_sessions)
+    train_arrays = [*pool_arrays, *test_arrays]
     train = PoseSequenceDataset(
-        pool_arrays,
+        train_arrays,
         window_s=cfg.data.window_s,
         bin_ms=cfg.data.bin_ms,
         split_name="train",
@@ -396,7 +417,7 @@ def build_split_datasets(
         normalize_neural=normalize_neural,
     )
     val = PoseSequenceDataset(
-        pool_arrays,
+        train_arrays,
         window_s=cfg.data.window_s,
         bin_ms=cfg.data.bin_ms,
         split_name="val",

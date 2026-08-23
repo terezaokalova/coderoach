@@ -123,8 +123,23 @@ def evaluate(
 
 
 def train_mean_pose(train_ds: PoseSequenceDataset) -> np.ndarray:
-    xy = np.concatenate([sess.pose_xy for sess in train_ds.sessions], axis=0)
-    mask = np.concatenate([sess.pose_mask for sess in train_ds.sessions], axis=0)
+    selected: dict[int, np.ndarray] = {}
+    for si, start in train_ds.items:
+        sess = train_ds.sessions[si]
+        end = start + train_ds.window_bins
+        sel = (sess.pose_bin_idx >= start) & (sess.pose_bin_idx < end)
+        selected[si] = sel if si not in selected else selected[si] | sel
+    if not selected:
+        n_k = train_ds.sessions[0].pose_xy.shape[1]
+        return np.zeros((n_k, 2), dtype=np.float32)
+    xy = np.concatenate(
+        [train_ds.sessions[si].pose_xy[sel] for si, sel in selected.items()],
+        axis=0,
+    )
+    mask = np.concatenate(
+        [train_ds.sessions[si].pose_mask[sel] for si, sel in selected.items()],
+        axis=0,
+    )
     mean = np.zeros((xy.shape[1], 2), dtype=np.float32)
     for k in range(xy.shape[1]):
         m = mask[:, k]
@@ -421,12 +436,28 @@ def main(argv: list[str] | None = None) -> None:
     summary = {
         "protocol": protocol,
         "train_sessions": (
-            list(dict.fromkeys([*cfg.split.train_sessions, *cfg.split.val_sessions]))
+            list(
+                dict.fromkeys(
+                    [
+                        *cfg.split.train_sessions,
+                        *cfg.split.val_sessions,
+                        *cfg.split.test_sessions,
+                    ]
+                )
+            )
             if protocol == "session"
             else list(cfg.split.test_sessions or (cfg.data.sessions[-1],))
         ),
         "val_sessions": (
-            list(dict.fromkeys([*cfg.split.train_sessions, *cfg.split.val_sessions]))
+            list(
+                dict.fromkeys(
+                    [
+                        *cfg.split.train_sessions,
+                        *cfg.split.val_sessions,
+                        *cfg.split.test_sessions,
+                    ]
+                )
+            )
             if protocol == "session"
             else list(cfg.split.test_sessions or (cfg.data.sessions[-1],))
         ),
@@ -436,6 +467,7 @@ def main(argv: list[str] | None = None) -> None:
             else list(cfg.split.test_sessions or (cfg.data.sessions[-1],))
         ),
         "val_is_temporal_holdout": protocol == "session",
+        "test_is_second_half": protocol == "session",
         "n_train": len(train_ds),
         "n_val": len(val_ds),
         "n_test": len(test_ds),
@@ -447,7 +479,7 @@ def main(argv: list[str] | None = None) -> None:
     }
     out_path = ckpt_dir / f"summary_{protocol}.json"
     out_path.write_text(json.dumps(summary, indent=2))
-    print("\n=== held-out test ===")
+    print("\n=== held-out test (second half) ===")
     print(f"test_sessions: {summary['test_sessions']}")
     print(
         f"rmse_px={test_metrics['rmse_px']:.2f}  "
