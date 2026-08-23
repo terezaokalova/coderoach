@@ -1,0 +1,25 @@
+{
+  "stim_gate": {
+    "commit": "e1323e56993adc9cd26821239a8731d1247af310",
+    "dirty": true,
+    "min_stim_interval_s": 2.0,
+    "settings_id_initial": "3226479a2140",
+    "settings_requested": {
+      "duration_ms": 250,
+      "frequency_hz": 10,
+      "gain_percent": 10,
+      "pulse_width_ms": 1,
+      "random_mode": false
+    },
+    "settings_seen": {
+      "3226479a2140": {
+        "duration_ms": 250,
+        "frequency_hz": 10,
+        "gain_percent": 10,
+        "pulse_width_ms": 1,
+        "random_mode": false
+      }
+    },
+    "t_refrac_s": 2.0
+  }
+}

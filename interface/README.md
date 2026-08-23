@@ -165,6 +165,9 @@ response. There is no culture washout.
 - At most 30 trains, or 9 seconds of combined train time, in a rolling 60
   second window. Older events age out and control continues. The log is
   shared across processes.
+- Train time is metered from the duration the board is actually holding.
+  `connect()` reads it back rather than assuming, so a backpack left
+  configured by another client is charged at what it delivers.
 
 A refused pulse raises an error and does not write the turn characteristic.
 These limits are a floor, not a license to ignore the animal. Stop if the

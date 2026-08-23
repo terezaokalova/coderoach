@@ -111,3 +111,44 @@ Open:
   checking the resampler against its Python twin. It has not been opened on an
   actual iPad. Palm rejection in particular is calibrated on a 1.5 s grace
   window that only a real Pencil can confirm.
+
+
+# traj/track.py -- arena mask
+
+## Plan
+
+- [x] Keep the calibration's `image_points` on `ArenaHomography`
+- [x] `region_mask()`: 255 inside the arena polygon, 0 outside
+- [x] `detect(..., region=None)`, applied after the morphology and before
+      `findContours`
+- [x] Build it once in `TrajectoryTracker.__init__`, pass it every frame
+- [x] Tests that the cardboard wins unmasked and cannot win masked
+- [x] `ruff format . ; ruff check --fix .`
+
+## Review
+
+The tracker takes the largest contour in the frame, so anything red outside the
+arena competes with the backpack and wins as soon as it is bigger. No HSV
+window fixes that, because the difference between cardboard and a backpack is
+where they are and not what colour they are. `ArenaHomography.region_mask()`
+zeroes everything outside the calibration polygon and `detect` intersects it
+with the threshold mask before `findContours`.
+
+Three details worth keeping:
+
+- **The mask is applied after the morphology, not before.** `threshold_mask`
+  closes gaps, and closing runs first so a blob reaching over the arena edge is
+  cut at the edge rather than being closed across it and surviving.
+- **`detect(region=...)` defaults to None.** `traj/calibrate.py` calls `detect`
+  while calibrating HSV, which happens before there is an arena calibration to
+  mask with, so that call is unchanged.
+- **`image_points` is now a field on `ArenaHomography`.** The matrix alone
+  cannot say where the arena's edge is. Existing `arena.json` files already
+  carry the points -- `traj/calibrate.py` has always written them -- so nothing
+  needs recalibrating. Only `fit()` constructs the dataclass, so nothing else
+  had to change.
+
+A blob straddling the arena edge is clipped and its centroid pulled inwards.
+That is the intended trade: the edge is where the homography stops being valid
+anyway. If the roach is being tracked right at the boundary in practice, the
+fix is a larger arena calibration, not a looser mask.

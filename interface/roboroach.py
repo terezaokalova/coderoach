@@ -134,6 +134,9 @@ class RoboRoach:
         self.name = name
         self.scan_timeout = scan_timeout
         self.client: BleakClient | None = None
+        # Replaced by the board's own value in connect(). Only a placeholder
+        # for the window between construction and connection, where no turn can
+        # happen because _connected_client() refuses one.
         self._duration_ms = 250
 
     async def connect(self) -> None:
@@ -161,6 +164,7 @@ class RoboRoach:
                 f"Connected to {self.device.name!r}, but it does not expose "
                 f"the RoboRoach service {SERVICE_UUID}."
             )
+        self._duration_ms = await self._read_duration_ms()
 
     async def disconnect(self) -> None:
         if self.client is not None:
@@ -195,6 +199,21 @@ class RoboRoach:
             gain_percent=await read_u8(GAIN_UUID),
             random_mode=bool(await read_u8(RANDOM_MODE_UUID)),
         )
+
+    async def _read_duration_ms(self) -> int:
+        """Train length the board is actually holding, in milliseconds.
+
+        guard_turn() and record_turn() meter the rolling charge budget from
+        _duration_ms, so it has to be what the firmware will deliver rather than
+        what this object last asked for. Before connect() read it, a board left
+        configured by another client -- the Backyard Brains app writes 500 ms --
+        was metered at the 250 ms this class assumes at construction, so the
+        9 s-per-60 s budget drained at half the true rate.
+        """
+        value = await self._connected_client().read_gatt_char(DURATION_UUID)
+        if not value:
+            raise RuntimeError(f"Empty value returned by {DURATION_UUID}")
+        return 5 * value[0]
 
     async def read_battery_percent(self) -> int | None:
         try:
