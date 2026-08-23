@@ -54,6 +54,8 @@ class ModelConfig:
     n_heads: int
     hidden_size: int
     feedforward_factor: int
+    dilations: tuple[int, ...]
+    dropout: float
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,7 @@ class TrainConfig:
     device: str
     checkpoint_dir: Path
     time_shift_bins: int
+    adv_weight: float
 
 
 @dataclass(frozen=True)
@@ -116,7 +119,10 @@ _MODEL_OPTIONAL = {
     "n_heads",
     "hidden_size",
     "feedforward_factor",
+    "dilations",
+    "dropout",
 }
+_TRAIN_OPTIONAL = {"adv_weight"}
 _BACKBONES = {"cnn", "ndt3"}
 _TRAIN_KEYS = {
     "seed",
@@ -174,7 +180,7 @@ def load_pose_decoder_config(path: str | Path) -> PoseDecoderConfig:
     data_raw = _require_section(raw, "data", _DATA_KEYS)
     split_raw = _require_section(raw, "split", _SPLIT_KEYS)
     model_raw = _require_section(raw, "model", _MODEL_KEYS, optional=_MODEL_OPTIONAL)
-    train_raw = _require_section(raw, "train", _TRAIN_KEYS)
+    train_raw = _require_section(raw, "train", _TRAIN_KEYS, optional=_TRAIN_OPTIONAL)
 
     protocol = str(split_raw["protocol"])
     if protocol not in {"temporal", "session"}:
@@ -190,6 +196,23 @@ def load_pose_decoder_config(path: str | Path) -> PoseDecoderConfig:
     n_layers = int(model_raw["n_layers"])
     if n_layers < 1:
         raise ValueError(f"model.n_layers must be >= 1, got {n_layers}")
+    if "dilations" in model_raw:
+        dilations = tuple(int(d) for d in model_raw["dilations"])
+        if len(dilations) != n_layers:
+            raise ValueError(
+                f"model.dilations length {len(dilations)} must match "
+                f"n_layers {n_layers}"
+            )
+        if any(d < 1 for d in dilations):
+            raise ValueError(f"model.dilations must be >= 1, got {dilations}")
+    else:
+        dilations = tuple(2**i for i in range(n_layers))
+    dropout = float(model_raw.get("dropout", 0.0))
+    if dropout < 0 or dropout >= 1:
+        raise ValueError(f"model.dropout must be in [0, 1), got {dropout}")
+    adv_weight = float(train_raw.get("adv_weight", 0.0))
+    if adv_weight < 0:
+        raise ValueError(f"train.adv_weight must be >= 0, got {adv_weight}")
 
     train_frac = float(split_raw["train_frac"])
     val_frac = float(split_raw["val_frac"])
@@ -254,6 +277,8 @@ def load_pose_decoder_config(path: str | Path) -> PoseDecoderConfig:
             n_heads=int(model_raw.get("n_heads", 8)),
             hidden_size=int(model_raw.get("hidden_size", 1024)),
             feedforward_factor=int(model_raw.get("feedforward_factor", 1)),
+            dilations=dilations,
+            dropout=dropout,
         ),
         train=TrainConfig(
             seed=int(train_raw["seed"]),
@@ -266,5 +291,6 @@ def load_pose_decoder_config(path: str | Path) -> PoseDecoderConfig:
             device=str(train_raw["device"]),
             checkpoint_dir=_as_path(train_raw["checkpoint_dir"], base),
             time_shift_bins=int(train_raw["time_shift_bins"]),
+            adv_weight=adv_weight,
         ),
     )

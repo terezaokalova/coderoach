@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import pickle
 import urllib.request
 from pathlib import Path
 
@@ -88,6 +89,7 @@ class NDT3PoseDecoder(nn.Module):
             [_Block(hidden_size, n_heads, ff) for _ in range(n_layers)]
         )
         self.head = nn.Linear(hidden_size, n_keypoints * coords)
+        self.register_buffer("pose_mean", torch.zeros(n_keypoints, coords))
         if freeze_backbone:
             for param in (*self.spike_embed.parameters(), *self.layers.parameters()):
                 param.requires_grad = False
@@ -120,7 +122,8 @@ class NDT3PoseDecoder(nn.Module):
         idx = pose_bin_idx.clamp(0, t - 1)
         batch_idx = torch.arange(b, device=neural.device)[:, None].expand(b, p)
         sampled = encoded[batch_idx, idx]
-        pred = self.head(sampled).view(b, p, self.n_keypoints, self.coords)
+        residual = self.head(sampled).view(b, p, self.n_keypoints, self.coords)
+        pred = residual + self.pose_mean
         if pose_valid is not None:
             pred = pred * pose_valid[..., None, None].to(pred.dtype)
         return pred
@@ -148,6 +151,39 @@ def download_ndt3_checkpoint(
         return dest
 
 
+class _IgnoreUnpickled:
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def __setstate__(self, state) -> None:
+        return
+
+
+class _CheckpointUnpickler(pickle.Unpickler):
+    def find_class(self, module: str, name: str):
+        try:
+            return super().find_class(module, name)
+        except (ModuleNotFoundError, AttributeError):
+            return type(name, (_IgnoreUnpickled,), {"__module__": module})
+
+
+class _CheckpointPickle:
+    Unpickler = _CheckpointUnpickler
+
+    @staticmethod
+    def load(file, **kwargs):
+        return _CheckpointUnpickler(file).load()
+
+
+def _load_lightning_ckpt(ckpt_path: Path) -> object:
+    return torch.load(
+        ckpt_path,
+        map_location="cpu",
+        weights_only=False,
+        pickle_module=_CheckpointPickle,
+    )
+
+
 def _state_dict_from_ckpt(blob: object) -> dict[str, torch.Tensor]:
     if not isinstance(blob, dict):
         raise TypeError("NDT3 checkpoint is not a mapping")
@@ -157,7 +193,7 @@ def _state_dict_from_ckpt(blob: object) -> dict[str, torch.Tensor]:
 
 
 def load_ndt3_weights(model: NDT3PoseDecoder, ckpt_path: Path) -> dict[str, int]:
-    blob = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    blob = _load_lightning_ckpt(ckpt_path)
     src = _state_dict_from_ckpt(blob)
     dest = model.state_dict()
     mapped: dict[str, torch.Tensor] = {}
@@ -198,7 +234,9 @@ def load_ndt3_weights(model: NDT3PoseDecoder, ckpt_path: Path) -> dict[str, int]
     }
 
 
-def build_pose_model(cfg: ModelConfig) -> PoseDecoder | NDT3PoseDecoder:
+def build_pose_model(
+    cfg: ModelConfig, *, n_sessions: int = 0
+) -> PoseDecoder | NDT3PoseDecoder:
     if cfg.backbone == "cnn":
         return PoseDecoder(
             in_channels=cfg.in_channels,
@@ -208,6 +246,9 @@ def build_pose_model(cfg: ModelConfig) -> PoseDecoder | NDT3PoseDecoder:
             n_layers=cfg.n_layers,
             n_keypoints=cfg.n_keypoints,
             coords=cfg.coords,
+            dilations=cfg.dilations,
+            dropout=cfg.dropout,
+            n_sessions=n_sessions,
         )
     if cfg.backbone != "ndt3":
         raise ValueError(f"unknown backbone {cfg.backbone!r}")

@@ -57,7 +57,10 @@ def test_load_pose_decoder_config(tmp_path: Path):
     assert cfg.model.hidden_channels == 64
     assert cfg.model.kernel_size == 10
     assert cfg.model.stride == 1
-    assert cfg.model.n_layers == 2
+    assert cfg.model.n_layers == 3
+    assert cfg.model.dilations == (1, 2, 4)
+    assert cfg.model.dropout == 0.2
+    assert cfg.train.adv_weight == 0.1
     assert cfg.split.protocol == "session"
     assert cfg.split.test_frac == 0.0
     assert cfg.split.test_sessions == ("SD11_rec_20260820_182553.zarr",)
@@ -288,6 +291,36 @@ def test_decoder_shapes_loss_and_checkpoint(tmp_path: Path):
     pred_s = strided(neural, pose_bin_idx, pose_valid)
     assert pred_s.shape == (4, 8, 15, 2)
     assert strided.time_stride == 8
+    assert strided.dilations == (1, 2, 4)
+
+
+def test_residual_mean_and_session_adversary():
+    model = PoseDecoder(
+        in_channels=32,
+        hidden_channels=16,
+        kernel_size=5,
+        stride=1,
+        n_layers=3,
+        dilations=(1, 2, 4),
+        n_keypoints=15,
+        coords=2,
+        n_sessions=2,
+    )
+    neural = torch.randn(3, 40, 32)
+    pose_bin_idx = torch.randint(0, 40, (3, 5))
+    pose_valid = torch.ones(3, 5, dtype=torch.bool)
+    with torch.no_grad():
+        base = model(neural, pose_bin_idx, pose_valid)
+        model.pose_mean.fill_(0.25)
+        shifted = model(neural, pose_bin_idx, pose_valid)
+    assert torch.allclose(shifted, base + 0.25, atol=1e-5)
+    logits = model.session_logits(neural, 1.0)
+    assert logits is not None and logits.shape == (3, 2)
+    labels = torch.tensor([0, 1, 0])
+    loss = torch.nn.functional.cross_entropy(logits, labels)
+    loss.backward()
+    conv_grad = next(p.grad for p in model.encoder.parameters() if p.grad is not None)
+    assert conv_grad.abs().sum() > 0
 
 
 def test_evaluate_concat_variable_pose_counts():
@@ -347,7 +380,12 @@ def test_ndt3_decoder_shapes_and_weight_map(tmp_path: Path):
         pose_valid,
     )
     loss.backward()
+    class _Upstream:
+        pass
+
+    _Upstream.__module__ = "context_general_bci.config"
     fake = {
+        "hyper_parameters": _Upstream(),
         "state_dict": {
             "task_pipelines.spike_infill.readin.weight": torch.randn_like(
                 model.spike_embed.weight

@@ -1,4 +1,4 @@
-"""SONIC-style two-layer temporal CNN adapted for pose regression."""
+"""SONIC-style dilated temporal CNN adapted for pose regression."""
 
 from __future__ import annotations
 
@@ -6,8 +6,23 @@ import torch
 from torch import nn
 
 
+class _GradReverse(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, lambd: float) -> torch.Tensor:
+        ctx.lambd = lambd
+        return x
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor) -> tuple[torch.Tensor, None]:
+        return -ctx.lambd * grad, None
+
+
+def _default_dilations(n_layers: int) -> tuple[int, ...]:
+    return tuple(2**i for i in range(n_layers))
+
+
 class PoseDecoder(nn.Module):
-    """Temporal Conv1d stack + linear head to keypoints."""
+    """Dilated Conv1d stack + residual pose head + session adversary."""
 
     def __init__(
         self,
@@ -19,16 +34,26 @@ class PoseDecoder(nn.Module):
         n_layers: int = 2,
         n_keypoints: int = 15,
         coords: int = 2,
+        dilations: tuple[int, ...] | None = None,
+        dropout: float = 0.0,
+        n_sessions: int = 0,
     ) -> None:
         super().__init__()
         if stride < 1:
             raise ValueError(f"stride must be >= 1, got {stride}")
         if n_layers < 1:
             raise ValueError(f"n_layers must be >= 1, got {n_layers}")
-        pad = kernel_size // 2
+        dils = dilations if dilations is not None else _default_dilations(n_layers)
+        if len(dils) != n_layers:
+            raise ValueError(
+                f"dilations length {len(dils)} must match n_layers {n_layers}"
+            )
+        if any(d < 1 for d in dils):
+            raise ValueError(f"dilations must be >= 1, got {dils}")
         layers: list[nn.Module] = []
         ch_in = in_channels
-        for _ in range(n_layers):
+        for dil in dils:
+            pad = dil * (kernel_size // 2)
             layers.append(
                 nn.Conv1d(
                     ch_in,
@@ -36,27 +61,42 @@ class PoseDecoder(nn.Module):
                     kernel_size=kernel_size,
                     stride=stride,
                     padding=pad,
+                    dilation=dil,
                 )
             )
             layers.append(nn.ReLU(inplace=True))
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
             ch_in = hidden_channels
         self.encoder = nn.Sequential(*layers)
         self.head = nn.Linear(hidden_channels, n_keypoints * coords)
+        self.adv_head = None
+        if n_sessions >= 2:
+            adv: list[nn.Module] = [
+                nn.Linear(hidden_channels, hidden_channels),
+                nn.ReLU(inplace=True),
+            ]
+            if dropout > 0:
+                adv.append(nn.Dropout(dropout))
+            adv.append(nn.Linear(hidden_channels, n_sessions))
+            self.adv_head = nn.Sequential(*adv)
+        self.register_buffer("pose_mean", torch.zeros(n_keypoints, coords))
         self.n_keypoints = n_keypoints
         self.coords = coords
         self.kernel_size = kernel_size
         self.stride = stride
         self.n_layers = n_layers
+        self.dilations = dils
         self.time_stride = stride**n_layers
 
     def encode(self, neural: torch.Tensor) -> torch.Tensor:
         # neural: [B, T, C] -> [B, C, T]
         x = neural.transpose(1, 2)
         h = self.encoder(x)
-        # same-length padding with even kernels can add one sample at stride 1
+        # even kernels and dilated padding can grow the time axis by a few samples
         if self.time_stride == 1:
             t = neural.shape[1]
-            if h.shape[-1] != t:
+            if h.shape[-1] > t:
                 h = h[..., :t]
         return h.transpose(1, 2)  # [B, T', H]
 
@@ -66,7 +106,7 @@ class PoseDecoder(nn.Module):
         pose_bin_idx: torch.Tensor,
         pose_valid: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Return pose predictions [B, P, K, 2] sampled at pose_bin_idx."""
+        """Return mean plus residual pose [B, P, K, 2] at pose_bin_idx."""
         encoded = self.encode(neural)  # [B, T', H]
         b, p = pose_bin_idx.shape
         t = encoded.shape[1]
@@ -74,10 +114,17 @@ class PoseDecoder(nn.Module):
         idx = (pose_bin_idx // self.time_stride).clamp(0, t - 1)
         batch_idx = torch.arange(b, device=neural.device)[:, None].expand(b, p)
         sampled = encoded[batch_idx, idx]  # [B, P, H]
-        pred = self.head(sampled).view(b, p, self.n_keypoints, self.coords)
+        residual = self.head(sampled).view(b, p, self.n_keypoints, self.coords)
+        pred = residual + self.pose_mean
         if pose_valid is not None:
             pred = pred * pose_valid[..., None, None].to(pred.dtype)
         return pred
+
+    def session_logits(self, neural: torch.Tensor, lambd: float) -> torch.Tensor | None:
+        if self.adv_head is None:
+            return None
+        pooled = self.encode(neural).mean(dim=1)
+        return self.adv_head(_GradReverse.apply(pooled, lambd))
 
 
 def masked_smooth_l1(

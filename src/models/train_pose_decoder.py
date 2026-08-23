@@ -122,6 +122,17 @@ def evaluate(
     return metrics
 
 
+def train_mean_pose(train_ds: PoseSequenceDataset) -> np.ndarray:
+    xy = np.concatenate([sess.pose_xy for sess in train_ds.sessions], axis=0)
+    mask = np.concatenate([sess.pose_mask for sess in train_ds.sessions], axis=0)
+    mean = np.zeros((xy.shape[1], 2), dtype=np.float32)
+    for k in range(xy.shape[1]):
+        m = mask[:, k]
+        if m.any():
+            mean[k] = xy[m, k].mean(axis=0)
+    return mean
+
+
 @torch.no_grad()
 def mean_pose_baseline(
     train_ds: PoseSequenceDataset,
@@ -130,18 +141,7 @@ def mean_pose_baseline(
     frame_width: float,
     frame_height: float,
 ) -> dict:
-    xy = []
-    mask = []
-    for sess in train_ds.sessions:
-        xy.append(sess.pose_xy)
-        mask.append(sess.pose_mask)
-    xy = np.concatenate(xy, axis=0)
-    mask = np.concatenate(mask, axis=0)
-    mean = np.zeros((xy.shape[1], 2), dtype=np.float32)
-    for k in range(xy.shape[1]):
-        m = mask[:, k]
-        if m.any():
-            mean[k] = xy[m, k].mean(axis=0)
+    mean = train_mean_pose(train_ds)
     preds = []
     targets = []
     masks = []
@@ -165,14 +165,24 @@ def mean_pose_baseline(
     )
 
 
+def _adv_lambda(epoch: int, max_epochs: int) -> float:
+    progress = epoch / max(1, max_epochs)
+    return float(2.0 / (1.0 + np.exp(-10.0 * progress)) - 1.0)
+
+
 def train_one_epoch(
     model: PoseDecoder,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    *,
+    session_to_id: dict[str, int] | None = None,
+    adv_weight: float = 0.0,
+    adv_lambda: float = 1.0,
 ) -> float:
     model.train()
     losses = []
+    session_fn = getattr(model, "session_logits", None)
     for batch in loader:
         neural = batch["neural"].to(device)
         pose = batch["pose"].to(device)
@@ -181,10 +191,22 @@ def train_one_epoch(
         pose_bin_idx = batch["pose_bin_idx"].to(device)
         optimizer.zero_grad(set_to_none=True)
         pred = model(neural, pose_bin_idx, pose_valid)
-        loss = masked_smooth_l1(pred, pose, pose_mask, pose_valid)
+        pose_loss = masked_smooth_l1(pred, pose, pose_mask, pose_valid)
+        loss = pose_loss
+        if adv_weight > 0 and session_to_id is not None and session_fn is not None:
+            logits = session_fn(neural, adv_lambda)
+            if logits is not None:
+                sess_idx = torch.tensor(
+                    [session_to_id[name] for name in batch["session"]],
+                    device=device,
+                    dtype=torch.int64,
+                )
+                loss = loss + adv_weight * torch.nn.functional.cross_entropy(
+                    logits, sess_idx
+                )
         loss.backward()
         optimizer.step()
-        losses.append(float(loss.item()))
+        losses.append(float(pose_loss.item()))
     return float(np.mean(losses)) if losses else float("nan")
 
 
@@ -262,7 +284,10 @@ def main(argv: list[str] | None = None) -> None:
         collate_fn=collate_pose_batch,
     )
 
-    model = build_pose_model(cfg.model).to(device)
+    session_names = tuple(dict.fromkeys(s.session for s in train_ds.sessions))
+    session_to_id = {name: i for i, name in enumerate(session_names)}
+    model = build_pose_model(cfg.model, n_sessions=len(session_to_id)).to(device)
+    model.pose_mean.copy_(torch.from_numpy(train_mean_pose(train_ds)).to(device))
     params = [p for p in model.parameters() if p.requires_grad]
     if not params:
         raise SystemExit("no trainable parameters")
@@ -298,7 +323,15 @@ def main(argv: list[str] | None = None) -> None:
             optimizer.step()
             train_loss = float(loss.item())
         else:
-            train_loss = train_one_epoch(model, train_loader, optimizer, device)
+            train_loss = train_one_epoch(
+                model,
+                train_loader,
+                optimizer,
+                device,
+                session_to_id=session_to_id,
+                adv_weight=cfg.train.adv_weight,
+                adv_lambda=_adv_lambda(epoch, max_epochs),
+            )
         val_metrics = evaluate(
             model,
             val_loader,
