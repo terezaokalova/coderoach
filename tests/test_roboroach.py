@@ -8,28 +8,59 @@ UUID, byte value, and response flag rather than by watching an animal.
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
 
-from interface import RoboRoach
+from interface import RoboRoach, StimulationSettings
 from interface.roboroach import (
     DURATION_UUID,
+    FREQUENCY_UUID,
+    GAIN_UUID,
+    PULSE_WIDTH_UUID,
+    RANDOM_MODE_UUID,
     SERVICE_UUID,
     TURN_LEFT_UUID,
     _recent_stims,
+    guard_envelope,
+)
+
+# What the Backyard Brains phone app leaves on the board. Every value is over
+# the living-animal cap, which is the case the envelope guard exists for.
+PHONE_APP = StimulationSettings(
+    frequency_hz=55,
+    pulse_width_ms=9,
+    duration_ms=500,
+    gain_percent=50,
+    random_mode=False,
+)
+IN_ENVELOPE = StimulationSettings(
+    frequency_hz=10,
+    pulse_width_ms=1,
+    duration_ms=250,
+    gain_percent=10,
+    random_mode=False,
 )
 
 
 class FakeClient:
     """Records every GATT operation. Constructed by patching BleakClient."""
 
-    def __init__(self, device, duration_units: int = 100) -> None:
+    board = PHONE_APP
+
+    def __init__(self, device) -> None:
         self.device = device
         self.is_connected = False
         self.reads: list[str] = []
         self.writes: list[tuple[str, bytes, bool]] = []
-        self.values = {DURATION_UUID: bytes([duration_units])}
+        self.values = {
+            FREQUENCY_UUID: bytes([self.board.frequency_hz]),
+            PULSE_WIDTH_UUID: bytes([self.board.pulse_width_ms]),
+            DURATION_UUID: bytes([self.board.duration_ms // 5]),
+            GAIN_UUID: bytes([self.board.gain_percent]),
+            RANDOM_MODE_UUID: bytes([int(self.board.random_mode)]),
+        }
 
     async def connect(self) -> None:
         self.is_connected = True
@@ -49,7 +80,7 @@ class FakeClient:
         self.writes.append((uuid, data, response))
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def isolated_budget(tmp_path, monkeypatch):
     """Keep the rolling charge log out of the shared temp file."""
     monkeypatch.setattr(
@@ -58,7 +89,8 @@ def isolated_budget(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def client(monkeypatch):
+def board(monkeypatch):
+    """Patch in a fake board; set `board.settings` before connecting."""
     made: list[FakeClient] = []
 
     def build(device):
@@ -66,49 +98,118 @@ def client(monkeypatch):
         return made[-1]
 
     monkeypatch.setattr("interface.roboroach.BleakClient", build)
-    return made
+    monkeypatch.setattr(FakeClient, "board", PHONE_APP)
+    return SimpleNamespace(
+        clients=made,
+        set=lambda s: monkeypatch.setattr(FakeClient, "board", s),
+    )
 
 
-def test_connect_takes_duration_from_the_board(client, isolated_budget):
-    """A board holding 500 ms must not be metered as the assumed 250 ms."""
-
-    async def run():
+def run(coro_fn):
+    async def main():
         async with RoboRoach(device=SimpleNamespace(name="RoboRoach")) as roach:
-            return roach._duration_ms, client[0].reads
+            return await coro_fn(roach)
 
-    duration_ms, reads = asyncio.run(run())
-    assert DURATION_UUID in reads, "connect() must read the duration characteristic"
-    assert duration_ms == 500, "5 ms units: 100 units is 500 ms, not 100 or 250"
+    return asyncio.run(main())
 
 
-def test_turn_meters_the_boards_duration(client, isolated_budget):
-    """The charge budget records what the firmware delivers, not the guess."""
+# --------------------------------------------------------------------------
+# the envelope guard on its own
+# --------------------------------------------------------------------------
 
-    async def run():
-        async with RoboRoach(device=SimpleNamespace(name="RoboRoach")) as roach:
-            await roach.turn("left")
-            return client[0].writes
 
-    writes = asyncio.run(run())
+def test_guard_envelope_names_every_parameter_over_cap():
+    with pytest.raises(RuntimeError) as excinfo:
+        guard_envelope(PHONE_APP)
+    message = str(excinfo.value)
+    assert "frequency 55 Hz over the 10 Hz cap" in message
+    assert "pulse width 9 ms over the 1 ms cap" in message
+    assert "duration 500 ms over the 300 ms cap" in message
+    assert "gain 50% over the 10% cap" in message
+
+
+def test_guard_envelope_passes_inside_the_caps():
+    guard_envelope(IN_ENVELOPE)
+
+
+def test_guard_envelope_names_only_the_offender():
+    only_gain = StimulationSettings(10, 1, 250, 50, False)
+    with pytest.raises(RuntimeError) as excinfo:
+        guard_envelope(only_gain)
+    message = str(excinfo.value)
+    assert "gain 50%" in message
+    assert "frequency" not in message and "duration" not in message
+
+
+# --------------------------------------------------------------------------
+# turn() against a real-ish board
+# --------------------------------------------------------------------------
+
+
+def test_turn_refuses_a_board_left_on_phone_app_settings(board):
+    """The whole point: no GATT write reaches the turn characteristic."""
+    with pytest.raises(RuntimeError, match="outside the living-animal envelope"):
+        run(lambda roach: roach.turn("left"))
+    turn_writes = [w for w in board.clients[0].writes if w[0] == TURN_LEFT_UUID]
+    assert turn_writes == [], "refusal must happen before the GATT write"
+    assert _recent_stims(time.time()) == [], "a refused pulse must not be metered"
+
+
+def test_turn_writes_and_meters_when_inside_the_envelope(board):
+    board.set(IN_ENVELOPE)
+    writes = run(lambda roach: _turn_then_writes(roach))
     uuid, payload, response = writes[-1]
     assert uuid == TURN_LEFT_UUID
     assert payload == b"\x01"
     assert response is True, "commands are write-with-response"
-
-    events = _recent_stims(__import__("time").time())
-    assert [event["duration_ms"] for event in events] == [500]
+    assert [e["duration_ms"] for e in _recent_stims(time.time())] == [250]
 
 
-def test_configure_keeps_duration_in_step(client, isolated_budget):
-    """configure() still owns the value after connect() has seeded it."""
+async def _turn_then_writes(roach):
+    await roach.turn("left")
+    return roach.client.writes
 
-    async def run():
-        async with RoboRoach(device=SimpleNamespace(name="RoboRoach")) as roach:
-            seeded = roach._duration_ms
-            await roach.configure(duration_ms=250)
-            return seeded, roach._duration_ms, client[0].writes
 
-    seeded, after, writes = asyncio.run(run())
-    assert seeded == 500
-    assert after == 250
+def test_connect_reads_settings_from_the_board(board):
+    settings = run(lambda roach: _settings_of(roach))
+    assert settings == PHONE_APP, "connect() must not assume; it reads"
+    assert DURATION_UUID in board.clients[0].reads
+
+
+async def _settings_of(roach):
+    return roach._settings
+
+
+def test_turn_without_connect_refuses_rather_than_guessing():
+    roach = RoboRoach(device=SimpleNamespace(name="RoboRoach"))
+    with pytest.raises(RuntimeError, match="settings are unknown"):
+        asyncio.run(roach.turn("left"))
+
+
+def test_configure_keeps_the_cache_in_step(board):
+    before, after, writes = run(lambda roach: _configure(roach))
+    assert before == PHONE_APP
+    assert after == IN_ENVELOPE
     assert (DURATION_UUID, bytes([50]), True) in writes, "250 ms is 50 five-ms units"
+
+
+async def _configure(roach):
+    before = roach._settings
+    await roach.configure(
+        frequency_hz=10, pulse_width_ms=1, duration_ms=250, gain_percent=10
+    )
+    return before, roach._settings, roach.client.writes
+
+
+def test_configure_then_turn_is_allowed(board):
+    """configure() is the documented way out of a refusal."""
+    writes = run(lambda roach: _configure_then_turn(roach))
+    assert (TURN_LEFT_UUID, b"\x01", True) in writes
+
+
+async def _configure_then_turn(roach):
+    await roach.configure(
+        frequency_hz=10, pulse_width_ms=1, duration_ms=250, gain_percent=10
+    )
+    await roach.turn("left")
+    return roach.client.writes

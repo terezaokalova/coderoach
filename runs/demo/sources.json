@@ -1,6 +1,6 @@
 {
   "stim_gate": {
-    "commit": "e1323e56993adc9cd26821239a8731d1247af310",
+    "commit": "1eab80b4cd38392c88a58c6714257c38b44116c1",
     "dirty": true,
     "min_stim_interval_s": 2.0,
     "settings_id_initial": "3226479a2140",
