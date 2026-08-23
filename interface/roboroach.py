@@ -117,6 +117,47 @@ def guard_turn(duration_ms: int) -> None:
         )
 
 
+def guard_envelope(settings: StimulationSettings) -> None:
+    """Refuse a pulse the board is not configured to deliver safely.
+
+    configure() validates what this client writes, but nothing validated what
+    was already on the board. A backpack left on the phone app's settings
+    (55 Hz, 9 ms, 500 ms, 50% gain) would have stimulated at those values on the
+    first turn(), because turn() checked only the charge budget and metered that
+    against its own belief about duration.
+
+    Every cap is reported at once rather than the first one hit: an operator who
+    has to reconnect and retry to discover the next violation learns the board is
+    out of range one parameter at a time. This raises and changes nothing --
+    bringing the board back into range is configure()'s job, and doing it here
+    would silently restimulate at settings the caller never asked for.
+    """
+    over = []
+    if settings.frequency_hz > MAX_FREQUENCY_HZ:
+        over.append(
+            f"frequency {settings.frequency_hz} Hz over the {MAX_FREQUENCY_HZ} Hz cap"
+        )
+    if settings.pulse_width_ms > MAX_PULSE_WIDTH_MS:
+        over.append(
+            f"pulse width {settings.pulse_width_ms} ms over the "
+            f"{MAX_PULSE_WIDTH_MS} ms cap"
+        )
+    if settings.duration_ms > MAX_DURATION_MS:
+        over.append(
+            f"duration {settings.duration_ms} ms over the {MAX_DURATION_MS} ms cap"
+        )
+    if settings.gain_percent > MAX_GAIN_PERCENT:
+        over.append(
+            f"gain {settings.gain_percent}% over the {MAX_GAIN_PERCENT}% cap"
+        )
+    if over:
+        raise RuntimeError(
+            "The board is outside the living-animal envelope: "
+            + "; ".join(over)
+            + ". Call configure() to bring it into range."
+        )
+
+
 def record_turn(duration_ms: int) -> None:
     now = time.time()
     events = _recent_stims(now)
@@ -138,9 +179,12 @@ class RoboRoach:
         self.name = name
         self.scan_timeout = scan_timeout
         self.client: BleakClient | None = None
-        self._duration_ms = DEFAULT_DURATION_MS
         self._io_lock = asyncio.Lock()
-        self._configured = False
+        # What the board reported at connect(), refreshed by configure().
+        # turn() checks the envelope and meters charge from this, so it stays
+        # None until a real read has happened rather than starting life as an
+        # assumption that turn() would trust.
+        self._settings: StimulationSettings | None = None
 
     async def connect(self) -> None:
         if self.device is None:
@@ -167,12 +211,13 @@ class RoboRoach:
                 f"Connected to {self.device.name!r}, but it does not expose "
                 f"the RoboRoach service {SERVICE_UUID}."
             )
+        self._settings = await self.read_settings()
 
     async def disconnect(self) -> None:
         if self.client is not None:
             await self.client.disconnect()
             self.client = None
-            self._configured = False
+            self._settings = None
 
     async def __aenter__(self) -> "RoboRoach":
         await self.connect()
@@ -203,6 +248,20 @@ class RoboRoach:
                 gain_percent=await read_u8(GAIN_UUID),
                 random_mode=bool(await read_u8(RANDOM_MODE_UUID)),
             )
+
+    def _require_settings(self) -> StimulationSettings:
+        """What the board is holding, or a refusal to guess.
+
+        turn() will not stimulate against an unverified waveform, so an object
+        that has never completed a connect() has nothing to check and must not
+        fall back to a default.
+        """
+        if self._settings is None:
+            raise RuntimeError(
+                "The board's stimulation settings are unknown. connect() reads "
+                "them; turn() will not stimulate without them."
+            )
+        return self._settings
 
     async def read_battery_percent(self) -> int | None:
         try:
@@ -247,18 +306,25 @@ class RoboRoach:
             )
             for uuid, value in values:
                 await client.write_gatt_char(uuid, bytes([value]), response=True)
-            self._duration_ms = duration_ms
-            self._configured = True
+            self._settings = StimulationSettings(
+                frequency_hz=frequency_hz,
+                pulse_width_ms=pulse_width_ms,
+                duration_ms=duration_ms,
+                gain_percent=gain_percent,
+                random_mode=random_mode,
+            )
 
     async def turn(self, direction: Literal["left", "right"]) -> None:
         """Request one firmware-timed left or right turn stimulus."""
+        settings = self._require_settings()
+        guard_envelope(settings)
         async with self._io_lock:
-            if not self._configured:
-                raise RuntimeError("Configure safe settings before requesting a turn.")
-            guard_turn(self._duration_ms)
+            guard_turn(settings.duration_ms)
             uuid = TURN_LEFT_UUID if direction == "left" else TURN_RIGHT_UUID
-            await self._connected_client().write_gatt_char(uuid, b"\x01", response=True)
-            record_turn(self._duration_ms)
+            await self._connected_client().write_gatt_char(
+                uuid, b"\x01", response=True
+            )
+            record_turn(settings.duration_ms)
 
     async def turn_left(self) -> None:
         await self.turn("left")

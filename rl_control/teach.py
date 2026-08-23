@@ -95,6 +95,21 @@ class HabituatingAnimal:
         return weighted / weight_sum
 
 
+def _still_speed(
+    still_speed: float | None, tracker: PoseTracker | None
+) -> dict[str, float]:
+    """Resolve the stillness threshold, preserving the previous defaults.
+
+    Passing nothing reproduces exactly what was hardcoded before: 0.01 once a
+    camera is driving pose, 0.02 for the simulated animal. Both were tuned
+    against Pose.t as a step index; a tracker whose t is in seconds needs its
+    own value, which is why this is reachable from the CLI at all.
+    """
+    if still_speed is not None:
+        return {"still_speed": still_speed}
+    return {"still_speed": 0.01 if tracker is not None else 0.02}
+
+
 class AntiHabituationEnv:
     """Sustained turning without freezing. Action is frequency and duration.
 
@@ -124,12 +139,24 @@ class AntiHabituationEnv:
         self._still = 0
 
     @classmethod
-    def simulated(cls, direction: str = "left") -> "AntiHabituationEnv":
+    def simulated(
+        cls,
+        direction: str = "left",
+        tracker: PoseTracker | None = None,
+        still_speed: float | None = None,
+    ) -> "AntiHabituationEnv":
+        """Simulated stim. Pass a tracker to read pose from a real camera.
+
+        The simulated animal is still constructed and stepped when a tracker is
+        supplied, because the reward depends on it having moved; only the pose
+        that the env observes comes from the camera instead.
+        """
         animal = HabituatingAnimal()
         return cls(
-            tracker=SimulatedCamera(animal),
+            tracker=SimulatedCamera(animal) if tracker is None else tracker,
             animal=animal,
             direction=direction,
+            **_still_speed(still_speed, tracker),
         )
 
     @classmethod
@@ -138,6 +165,7 @@ class AntiHabituationEnv:
         stimulator: Stimulator,
         direction: str = "left",
         tracker: PoseTracker | None = None,
+        still_speed: float | None = None,
     ) -> "AntiHabituationEnv":
         """Real stim. Pass a camera tracker to drop the simulated animal."""
         if tracker is not None:
@@ -145,8 +173,8 @@ class AntiHabituationEnv:
                 tracker=tracker,
                 stimulator=stimulator,
                 direction=direction,
-                still_speed=0.03,
                 max_still=12,
+                **_still_speed(still_speed, tracker),
             )
         animal = HabituatingAnimal()
         return cls(
@@ -154,6 +182,7 @@ class AntiHabituationEnv:
             stimulator=stimulator,
             animal=animal,
             direction=direction,
+            **_still_speed(still_speed, tracker),
         )
 
     async def reset(self) -> MovementState:

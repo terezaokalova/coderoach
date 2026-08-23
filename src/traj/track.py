@@ -125,6 +125,12 @@ class ArenaHomography:
     frame_size: tuple[int, int]
     residual_mean_cm: float
     residual_max_cm: float
+    # Raw pixels, y down, in the order they were clicked -- which is the order
+    # around the arena's perimeter, because that is what the calibrator asks
+    # for and what a sane reprojection residual implies. Kept because the
+    # matrix alone cannot say where the arena's edge is, and :meth:`region_mask`
+    # needs the outline.
+    image_points: np.ndarray
 
     @classmethod
     def from_json(cls, path: Path | str) -> ArenaHomography:
@@ -186,6 +192,7 @@ class ArenaHomography:
             frame_size=(int(frame_size[0]), int(frame_size[1])),
             residual_mean_cm=float(residuals.mean()),
             residual_max_cm=float(residuals.max()),
+            image_points=np.asarray(image_points, dtype=np.float64).reshape(-1, 2),
         )
         if homography.residual_max_cm > MAX_RESIDUAL_CM:
             raise ValueError(
@@ -219,6 +226,45 @@ class ArenaHomography:
         src = np.asarray(points_cm, dtype=np.float64).reshape(-1, 1, 2)
         out = cv2.perspectiveTransform(src, self.inverse).reshape(-1, 2)
         return flip_image_y(out, self.frame_size[1])
+
+    def region_mask(self) -> np.ndarray:
+        """255 inside the calibrated arena, 0 outside, at the fitted size.
+
+        The tracker takes the largest contour in the frame, so anything red
+        outside the arena -- a cardboard box, a cable, someone's sleeve --
+        competes with the backpack and wins as soon as it is bigger. No HSV
+        window separates them reliably, because the problem is where they are
+        and not what colour they are. Zeroing everything outside the arena
+        removes them from the competition entirely.
+
+        The outline is the calibration polygon, so a backpack straddling the
+        arena edge is clipped and its centroid pulled inwards. That is the
+        intended trade: the edge is where the homography stops being valid
+        anyway.
+        """
+        width, height = self.frame_size
+        mask = np.zeros((height, width), dtype=np.uint8)
+        polygon = np.round(self.image_points).astype(np.int32).reshape(-1, 1, 2)
+        # fillPoly rather than fillConvexPoly: the format allows more than four
+        # correspondences, and a slightly non-convex outline is still a valid
+        # arena.
+        cv2.fillPoly(mask, [polygon], 255)
+
+        covered = int(cv2.countNonZero(mask))
+        if covered == 0:
+            raise ValueError(
+                "The arena calibration's image_points enclose no pixels, so "
+                "masking to them would hide every frame. Re-run "
+                "'python -m traj.calibrate arena' and click the corners around "
+                "the arena's perimeter."
+            )
+        log.info(
+            "arena mask: %d of %d pixels (%.1f%% of the frame) searched",
+            covered,
+            width * height,
+            100.0 * covered / (width * height),
+        )
+        return mask
 
     def check_frame_size(self, width: int, height: int) -> None:
         if (width, height) != self.frame_size:
@@ -316,14 +362,26 @@ class Detection:
 
 
 def detect(
-    frame_bgr: np.ndarray, bounds: HsvBounds, min_contour_area: float
+    frame_bgr: np.ndarray,
+    bounds: HsvBounds,
+    min_contour_area: float,
+    region: np.ndarray | None = None,
 ) -> tuple[Detection | None, np.ndarray]:
     """Largest contour above ``min_contour_area``, its centroid and its axis.
 
-    Returns ``(detection_or_None, mask)``. The mask is returned so the
-    calibrator can display exactly what the tracker would threshold.
+    ``region`` restricts the search to where it is non-zero, and is applied
+    after the morphology so that a blob straddling the boundary is cut at the
+    boundary rather than closed across it. The tracker passes the arena mask;
+    the HSV calibrator passes nothing, because it runs before there is an
+    arena calibration to mask with.
+
+    Returns ``(detection_or_None, mask)``. The mask is what was actually
+    searched, so the calibrator displays exactly what the tracker would
+    threshold.
     """
     mask = threshold_mask(frame_bgr, bounds)
+    if region is not None:
+        mask = cv2.bitwise_and(mask, region)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None, mask
@@ -555,6 +613,10 @@ class TrajectoryTracker:
             )
         height, width = priming_frame.shape[:2]
         self.homography.check_frame_size(width, height)
+        # Built once. It depends only on the calibration, and rebuilding it per
+        # frame would cost a fillPoly over the whole frame thirty times a
+        # second for a result that never changes.
+        self._region = self.homography.region_mask()
 
         self._run_dir = Path(config.run_dir)
         self._run_dir.mkdir(parents=True, exist_ok=True)
@@ -573,7 +635,10 @@ class TrajectoryTracker:
         t_frame = time.monotonic()
 
         detection, _ = detect(
-            frame, self._config.hsv_bounds, self._config.min_contour_area
+            frame,
+            self._config.hsv_bounds,
+            self._config.min_contour_area,
+            region=self._region,
         )
 
         measurement = None
@@ -873,6 +938,20 @@ class AsyncPoseTracker:
                 # already been raised to any waiting read(). Surfacing it a
                 # second time here would mask the caller's own exit path.
                 log.debug("tracker pump ended with an error", exc_info=True)
+            self._task = None
+        self._tracker.close()
+
+    def stop(self) -> None:
+        """Synchronous shutdown, for ``rl_control``'s non-async cleanup paths.
+
+        ``interface.plot.run_with_dashboard`` and ``rl_control.live`` both close
+        a tracker with a bare ``tracker.stop()`` inside a ``finally``, where
+        there is no loop to await on. Cancelling the pump without awaiting it is
+        enough here: the task owns no resource of its own, and the capture is
+        released on this line rather than by the task.
+        """
+        if self._task is not None:
+            self._task.cancel()
             self._task = None
         self._tracker.close()
 

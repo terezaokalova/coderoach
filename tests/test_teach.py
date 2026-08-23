@@ -128,7 +128,7 @@ def test_roboroach_serializes_gatt_and_requires_safe_configuration(
         client = FakeGattClient()
         device = roboroach.RoboRoach()
         device.client = client
-        with pytest.raises(RuntimeError, match="Configure safe settings"):
+        with pytest.raises(RuntimeError, match="settings are unknown"):
             await device.turn("right")
         await asyncio.gather(
             device.configure(frequency_hz=4, duration_ms=225),
@@ -272,7 +272,15 @@ def test_live_cli_defaults_are_bounded_bandit() -> None:
         captured["args"] = args
 
     old = sys.argv
-    sys.argv = ["rl_control", "teach", "--live", "--source", "phone"]
+    sys.argv = [
+        "rl_control",
+        "teach",
+        "--live",
+        "--source",
+        "phone",
+        "--run-dir",
+        "runs/demo",
+    ]
     try:
         with patch("rl_control.live.run_live_teach", fake_live):
             main()

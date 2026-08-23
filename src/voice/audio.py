@@ -16,6 +16,14 @@ import sounddevice as sd
 # What Whisper consumes. Anything else has to be resampled before ASR.
 SAMPLE_RATE = 16000
 
+# The built-in MacBook mic, which is also what CoreAudio currently hands out as
+# the system default. It is pinned by index rather than left to the default so
+# the capture device cannot move mid-session: a Teams or Zoom virtual input
+# appearing is enough to change what "default" means. Index is positional, so
+# plugging in another input can renumber it; pass `device=` to override, or
+# `device=None` to follow the OS default instead.
+DEFAULT_INPUT_DEVICE = 1
+
 
 @dataclass(frozen=True)
 class Recording:
@@ -34,7 +42,9 @@ class Recording:
         return float(np.abs(self.samples).max()) if self.samples.size else 0.0
 
 
-def record_window(seconds: float, device: int | str | None = None) -> Recording:
+def record_window(
+    seconds: float, device: int | str | None = DEFAULT_INPUT_DEVICE
+) -> Recording:
     """Block for `seconds`, then return mono float32 at SAMPLE_RATE.
 
     t_capture_start is stamped once the stream is actually running, and

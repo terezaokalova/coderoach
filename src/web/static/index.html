@@ -1,0 +1,882 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>CodeRoach canvas</title>
+<style>
+:root {
+  --bg: #12141a;
+  --panel: #1b1e27;
+  --line: #2b303d;
+  --ink: #e8ebf2;
+  --dim: #8d94a6;
+  --reference: #ff9838;
+  --walked: #66e0a3;
+  --stroke: #7db8ff;
+  --roach: #46d8ff;
+  --accept: #66e0a3;
+  --reject: #ff7b72;
+  --warn: #ffcc66;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.45 ui-sans-serif, -apple-system, "SF Pro Text", system-ui, sans-serif;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+}
+body { display: flex; flex-direction: column; }
+
+header {
+  display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+  padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .01em; }
+header .run { color: var(--dim); font-variant-numeric: tabular-nums; }
+.pill {
+  padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  border: 1px solid var(--line);
+}
+.pill.live { color: var(--accept); border-color: #2c5a45; background: #16241d; }
+.pill.replay { color: var(--warn); border-color: #5a4d2c; background: #241f16; }
+
+#notes {
+  margin: 0; padding: 8px 16px; border-bottom: 1px solid var(--line);
+  background: #221d16; color: var(--warn); font-size: 13px;
+}
+#notes:empty { display: none; }
+#notes div + div { margin-top: 3px; }
+
+main {
+  flex: 1; display: flex; gap: 14px; padding: 14px; min-height: 0; align-items: stretch;
+}
+.left { flex: 1 1 auto; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.right { flex: 0 0 260px; display: flex; flex-direction: column; gap: 12px; }
+@media (max-width: 900px) {
+  main { flex-direction: column; }
+  .right { flex: 0 0 auto; }
+}
+
+.panel {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 12px;
+}
+.panel h2 {
+  margin: 0 0 9px; font-size: 11px; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--dim); font-weight: 600;
+}
+
+#video-wrap { position: relative; background: #000; border-radius: 10px; overflow: hidden;
+  border: 1px solid var(--line); min-height: 80px; }
+#video { display: block; width: 100%; height: auto; }
+#video-msg {
+  position: absolute; inset: 0; display: none; place-items: center;
+  color: var(--dim); font-size: 13px; text-align: center; padding: 20px;
+}
+#video-wrap.empty { min-height: 160px; }
+#video-wrap.empty #video { display: none; }
+#video-wrap.empty #video-msg { display: grid; }
+
+#canvas-wrap { flex: 1; min-height: 260px; position: relative; }
+#canvas {
+  width: 100%; height: 100%; display: block;
+  background: #0d0f14; border: 1px solid var(--line); border-radius: 10px;
+  /* Safari must not scroll, zoom, or rubber-band while the Pencil is down. */
+  touch-action: none;
+  -webkit-user-select: none; user-select: none;
+  -webkit-touch-callout: none;
+  cursor: crosshair;
+}
+.canvas-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px;
+}
+.canvas-bar .hint { color: var(--dim); font-size: 12px; margin-left: auto; }
+
+button {
+  font: inherit; font-weight: 600; color: var(--ink);
+  background: #262b37; border: 1px solid var(--line); border-radius: 8px;
+  padding: 9px 14px; cursor: pointer; touch-action: manipulation;
+  -webkit-user-select: none; user-select: none;
+}
+button:active { background: #333a4a; }
+button:disabled { opacity: .4; cursor: default; }
+button.primary { background: #2b4a7a; border-color: #37598f; }
+button.danger { background: #5a2b2b; border-color: #7a3838; }
+.turns { display: flex; gap: 8px; }
+.turns button { flex: 1; }
+.stack { display: flex; flex-direction: column; gap: 8px; }
+
+.readout { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; }
+.readout .k { color: var(--dim); }
+.readout .v { font-variant-numeric: tabular-nums; font-weight: 600; }
+.state-ready { color: var(--accept); }
+.state-refractory { color: var(--warn); }
+.state-off { color: var(--dim); }
+
+.slider { margin-top: 10px; }
+.slider label {
+  display: flex; justify-content: space-between; font-size: 12px; color: var(--dim);
+}
+.slider label b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.slider input { width: 100%; margin: 4px 0 0; touch-action: manipulation; }
+
+footer {
+  border-top: 1px solid var(--line); background: var(--panel);
+  max-height: 30vh; display: flex; flex-direction: column;
+}
+footer h2 {
+  margin: 0; padding: 8px 16px; font-size: 11px; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--dim); font-weight: 600;
+  border-bottom: 1px solid var(--line);
+}
+#log-scroll { overflow-y: auto; overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+td {
+  padding: 4px 10px; border-bottom: 1px solid #22262f; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+tr:last-child td { border-bottom: 0; }
+td.t { color: var(--dim); }
+td.ok { color: var(--accept); font-weight: 600; }
+td.no { color: var(--reject); font-weight: 600; }
+td.note { color: var(--dim); font-style: italic; }
+.legend { display: flex; gap: 14px; font-size: 12px; color: var(--dim); }
+.legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px;
+  vertical-align: middle; margin-right: 5px; }
+#replay { display: none; }
+#replay.on { display: block; }
+select { font: inherit; background: #262b37; color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px; width: 100%; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CodeRoach canvas</h1>
+  <span id="mode" class="pill">connecting</span>
+  <span class="run">run <span id="run-id">-</span></span>
+  <span class="run" id="conn">socket idle</span>
+</header>
+<div id="notes"></div>
+
+<main>
+  <div class="left">
+    <div id="video-wrap" class="empty">
+      <img id="video" alt="tracker preview">
+      <div id="video-msg">no camera</div>
+    </div>
+
+    <div class="panel" style="display:flex;flex-direction:column;flex:1;min-height:0">
+      <h2>Arena &mdash; draw a path</h2>
+      <div id="canvas-wrap"><canvas id="canvas"></canvas></div>
+      <div class="canvas-bar">
+        <button id="send" class="primary" disabled>Send path</button>
+        <button id="clear">Clear</button>
+        <span class="legend">
+          <span><i style="background:var(--reference)"></i>reference</span>
+          <span><i style="background:var(--walked)"></i>walked</span>
+        </span>
+        <span class="hint" id="canvas-hint">draw with a finger or Pencil</span>
+      </div>
+    </div>
+  </div>
+
+  <aside class="right">
+    <div class="panel">
+      <h2>Stimulate</h2>
+      <div class="stack">
+        <div class="turns">
+          <button id="left">Left</button>
+          <button id="right">Right</button>
+        </div>
+        <button id="speak">Speak</button>
+        <button id="stop" class="danger">Stop</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Gate</h2>
+      <div class="readout"><span class="k">n</span><span class="v" id="r-n">-</span></div>
+      <div class="readout"><span class="k">since stim</span><span class="v" id="r-since">-</span></div>
+      <div class="readout"><span class="k">state</span><span class="v state-off" id="r-refrac">-</span></div>
+    </div>
+
+    <div class="panel">
+      <h2>Tracker</h2>
+      <div class="readout"><span class="k">position</span><span class="v" id="r-pos">-</span></div>
+      <div class="readout"><span class="k">speed</span><span class="v" id="r-speed">-</span></div>
+      <div class="readout"><span class="k">heading</span><span class="v" id="r-heading">-</span></div>
+      <div class="readout"><span class="k">cross-track</span><span class="v" id="r-cross">-</span></div>
+    </div>
+
+    <div class="panel">
+      <h2>Pursuit</h2>
+      <div class="slider">
+        <label for="s-ld">lookahead L_d<b><span id="v-ld">-</span> cm</b></label>
+        <input type="range" id="s-ld" min="1" max="40" step="0.5">
+      </div>
+      <div class="slider">
+        <label for="s-alpha">deadband alpha<b><span id="v-alpha">-</span> rad</b></label>
+        <input type="range" id="s-alpha" min="0" max="1.2" step="0.01">
+      </div>
+    </div>
+
+    <div class="panel" id="replay">
+      <h2>Replay</h2>
+      <select id="run-picker"></select>
+      <div class="canvas-bar" style="margin-top:8px">
+        <button id="play">Play</button>
+        <span class="hint" id="replay-hint">no runs</span>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<footer>
+  <h2>Stimulation log</h2>
+  <div id="log-scroll"><table><tbody id="log"></tbody></table></div>
+</footer>
+
+<script>window.CONFIG = __WEB_CONFIG__;</script>
+<script>
+"use strict";
+
+const CONFIG = window.CONFIG;
+const $ = (id) => document.getElementById(id);
+
+const canvas = $("canvas");
+const ctx = canvas.getContext("2d");
+
+// ---------------------------------------------------------------- state
+
+const state = {
+  arena: CONFIG.arena,
+  reference: [],      // cm, what the server is following
+  walked: [],         // cm, where the roach has actually been
+  stroke: [],         // cm, the stroke under the pointer right now
+  roach: null,        // cm
+  carrot: null,       // cm
+  traceId: null,
+  tracing: false,
+  replayRun: null,
+  replayIndex: 0,
+  replayTimer: null,
+  lookahead: CONFIG.lookahead_cm,
+  alphaDead: CONFIG.alpha_dead_rad,
+};
+
+// ---------------------------------------------------------------- chrome
+
+function boot() {
+  $("run-id").textContent = CONFIG.run_id;
+  const mode = $("mode");
+  mode.textContent = CONFIG.live ? "live" : "replay";
+  mode.className = "pill " + (CONFIG.live ? "live" : "replay");
+
+  const notes = $("notes");
+  for (const note of CONFIG.notes || []) {
+    const line = document.createElement("div");
+    line.textContent = note;
+    notes.appendChild(line);
+  }
+
+  const capable = CONFIG.capabilities || {};
+  const roachOff = !(capable.roach || {}).available;
+  for (const id of ["left", "right", "stop"]) $(id).disabled = roachOff;
+  $("speak").disabled = roachOff || !(capable.voice || {}).available;
+
+  if (!CONFIG.live) {
+    $("video-msg").textContent = (capable.camera || {}).detail || "no camera";
+    $("replay").classList.add("on");
+    $("canvas-hint").textContent = "replay mode - drawing is disabled";
+    loadRuns();
+  }
+
+  $("s-ld").value = state.lookahead;
+  $("s-alpha").value = state.alphaDead;
+  showGains();
+}
+
+function showGains() {
+  $("v-ld").textContent = Number(state.lookahead).toFixed(1);
+  $("v-alpha").textContent = Number(state.alphaDead).toFixed(2);
+}
+
+// ------------------------------------------------------- arena mapping
+
+// The canvas is drawn in arena centimetres, not in image pixels, so turning a
+// stroke into waypoints is a scale and a y-flip rather than a projective
+// transform. The homography stays on the server, where it belongs: it is what
+// the camera calibration measured, and shipping it here would mean keeping two
+// copies of it in step.
+let view = { scale: 1, ox: 0, oy: 0, ready: false };
+
+function fitArena() {
+  const bounds = state.arena;
+  if (!bounds) { view.ready = false; return; }
+  const pad = 10 * (window.devicePixelRatio || 1);
+  const width = bounds.x_max - bounds.x_min;
+  const height = bounds.y_max - bounds.y_min;
+  if (!(width > 0) || !(height > 0)) { view.ready = false; return; }
+
+  const scale = Math.min(
+    (canvas.width - 2 * pad) / width,
+    (canvas.height - 2 * pad) / height
+  );
+  view = {
+    scale,
+    ox: (canvas.width - width * scale) / 2 - bounds.x_min * scale,
+    oy: (canvas.height + height * scale) / 2 + bounds.y_min * scale,
+    ready: true,
+  };
+}
+
+const toPx = (x, y) => [view.ox + x * view.scale, view.oy - y * view.scale];
+const toCm = (px, py) => [(px - view.ox) / view.scale, (view.oy - py) / view.scale];
+
+function resizeCanvas() {
+  const ratio = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.round(rect.width * ratio));
+  canvas.height = Math.max(1, Math.round(rect.height * ratio));
+  fitArena();
+  draw();
+}
+new ResizeObserver(resizeCanvas).observe(canvas);
+window.addEventListener("orientationchange", () => setTimeout(resizeCanvas, 200));
+
+// ------------------------------------------------------------- drawing
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!view.ready) {
+    ctx.fillStyle = "#6b7285";
+    ctx.font = `${13 * (window.devicePixelRatio || 1)}px system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.fillText(
+      state.arena ? "arena has no extent" : "no arena calibration",
+      canvas.width / 2, canvas.height / 2
+    );
+    return;
+  }
+
+  drawArenaBox();
+  polyline(state.reference, "var(--reference)", 2.5);
+  polyline(state.walked, "var(--walked)", 2);
+  polyline(state.stroke, "var(--stroke)", 2.5, true);
+  if (state.carrot) dot(state.carrot, "var(--reference)", 5, true);
+  if (state.roach) dot(state.roach, "var(--roach)", 6, false);
+}
+
+function scaled(value) { return value * (window.devicePixelRatio || 1); }
+
+function drawArenaBox() {
+  const b = state.arena;
+  const [x0, y0] = toPx(b.x_min, b.y_max);
+  const [x1, y1] = toPx(b.x_max, b.y_min);
+  ctx.strokeStyle = "#262b37";
+  ctx.lineWidth = scaled(1);
+  ctx.setLineDash([scaled(4), scaled(4)]);
+  ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+  ctx.setLineDash([]);
+}
+
+function polyline(points, colour, width, dashed) {
+  if (!points || points.length < 2) return;
+  ctx.strokeStyle = cssVar(colour);
+  ctx.lineWidth = scaled(width);
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  if (dashed) ctx.setLineDash([scaled(5), scaled(4)]);
+  ctx.beginPath();
+  points.forEach(([x, y], index) => {
+    const [px, py] = toPx(x, y);
+    index === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+  });
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function dot(point, colour, radius, hollow) {
+  const [px, py] = toPx(point[0], point[1]);
+  ctx.beginPath();
+  ctx.arc(px, py, scaled(radius), 0, Math.PI * 2);
+  if (hollow) {
+    ctx.strokeStyle = cssVar(colour);
+    ctx.lineWidth = scaled(2);
+    ctx.stroke();
+  } else {
+    ctx.fillStyle = cssVar(colour);
+    ctx.fill();
+  }
+}
+
+const varCache = {};
+function cssVar(value) {
+  if (!value.startsWith("var(")) return value;
+  const name = value.slice(4, -1).trim();
+  if (!varCache[name]) {
+    varCache[name] = getComputedStyle(document.documentElement)
+      .getPropertyValue(name).trim() || "#fff";
+  }
+  return varCache[name];
+}
+
+// ------------------------------------------------------- pointer input
+
+// Pointer events rather than mouse events: one code path covers the Pencil,
+// a finger, and a trackpad. Apple Pencil arrives as pointerType "pen".
+const PEN_GRACE_MS = 1500;
+let activePointerId = null;
+let penSeenAt = -Infinity;
+
+function pointOf(event) {
+  const rect = canvas.getBoundingClientRect();
+  return toCm(
+    (event.clientX - rect.left) * (canvas.width / rect.width),
+    (event.clientY - rect.top) * (canvas.height / rect.height)
+  );
+}
+
+// A hand resting on the screen while writing arrives as a touch pointer
+// alongside the pen. Touches are dropped while a pen is down and for a moment
+// after it lifts, which is the window a palm lands in. A rig with no Pencil
+// never sets penSeenAt, so finger drawing keeps working untouched.
+function isPalm(event) {
+  return event.pointerType === "touch" &&
+         (performance.now() - penSeenAt) < PEN_GRACE_MS;
+}
+
+function drawingAllowed() {
+  return CONFIG.live && view.ready;
+}
+
+canvas.addEventListener("pointerdown", (event) => {
+  if (event.pointerType === "pen") penSeenAt = performance.now();
+  if (!drawingAllowed() || isPalm(event)) return;
+  // One pointer draws. A second contact is a palm or a second finger, and
+  // either way it is not the stroke the operator means.
+  if (activePointerId !== null) return;
+
+  activePointerId = event.pointerId;
+  canvas.setPointerCapture(event.pointerId);
+  state.stroke = [pointOf(event)];
+  event.preventDefault();
+  draw();
+});
+
+canvas.addEventListener("pointermove", (event) => {
+  if (event.pointerType === "pen") penSeenAt = performance.now();
+  if (event.pointerId !== activePointerId) return;
+  // The Pencil reports far faster than the display refreshes, and the
+  // intermediate samples are what make a curve smooth rather than faceted.
+  const samples = event.getCoalescedEvents ? event.getCoalescedEvents() : [event];
+  for (const sample of samples) state.stroke.push(pointOf(sample));
+  event.preventDefault();
+  draw();
+});
+
+function endStroke(event) {
+  if (event.pointerId !== activePointerId) return;
+  activePointerId = null;
+  try { canvas.releasePointerCapture(event.pointerId); } catch (_) {}
+  event.preventDefault();
+  $("send").disabled = state.stroke.length < 2;
+  draw();
+}
+canvas.addEventListener("pointerup", endStroke);
+canvas.addEventListener("pointercancel", endStroke);
+
+// ---------------------------------------------------------- resampling
+
+// Mirrors traj.control.resample_path. The server re-spaces whatever arrives,
+// so this is not the authority -- it is here so that what the operator sees
+// sent is what pure pursuit will actually follow.
+function resample(points, spacing) {
+  if (points.length < 2) return points.slice();
+  const arc = [0];
+  for (let i = 1; i < points.length; i++) {
+    arc.push(arc[i - 1] + Math.hypot(
+      points[i][0] - points[i - 1][0],
+      points[i][1] - points[i - 1][1]
+    ));
+  }
+  const total = arc[arc.length - 1];
+  if (!(total > 0)) return [points[0]];
+
+  const out = [];
+  let cursor = 1;
+  for (let d = 0; d < total; d += spacing) {
+    while (cursor < arc.length - 1 && arc[cursor] < d) cursor++;
+    const span = arc[cursor] - arc[cursor - 1];
+    const fraction = span > 0 ? (d - arc[cursor - 1]) / span : 0;
+    out.push([
+      points[cursor - 1][0] + fraction * (points[cursor][0] - points[cursor - 1][0]),
+      points[cursor - 1][1] + fraction * (points[cursor][1] - points[cursor - 1][1]),
+    ]);
+  }
+  out.push(points[points.length - 1]);
+  return out;
+}
+
+// --------------------------------------------------------------- calls
+
+async function call(path, body) {
+  const options = { method: "POST", headers: { "Content-Type": "application/json" } };
+  if (body !== undefined) options.body = JSON.stringify(body);
+  const response = await fetch(path, options);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.detail || response.statusText);
+  return payload;
+}
+
+async function guarded(button, work) {
+  const label = button.textContent;
+  button.disabled = true;
+  try {
+    await work();
+  } catch (error) {
+    logRow({ type: "note", note: "request failed", detail: String(error.message) });
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
+$("left").addEventListener("click", (e) =>
+  guarded(e.target, () => call("/api/turn", { direction: "left" })));
+$("right").addEventListener("click", (e) =>
+  guarded(e.target, () => call("/api/turn", { direction: "right" })));
+
+$("speak").addEventListener("click", (e) => guarded(e.target, async () => {
+  e.target.textContent = "Listening...";
+  await call("/api/voice");
+}));
+
+$("stop").addEventListener("click", (e) => guarded(e.target, async () => {
+  await call("/api/stop");
+  state.tracing = false;
+}));
+
+$("clear").addEventListener("click", () => {
+  state.stroke = [];
+  $("send").disabled = true;
+  draw();
+});
+
+$("send").addEventListener("click", (e) => guarded(e.target, async () => {
+  const points = resample(state.stroke, CONFIG.spacing_cm);
+  const reply = await call("/api/path", {
+    points,
+    lookahead_cm: state.lookahead,
+    alpha_dead_rad: state.alphaDead,
+  });
+  // The server re-spaced the stroke, so the reference drawn here is the one
+  // being followed rather than the one that was sent.
+  state.reference = reply.waypoints_cm;
+  state.walked = [];
+  state.traceId = reply.trace_id;
+  state.stroke = [];
+  state.tracing = true;
+  $("send").disabled = true;
+  draw();
+}));
+
+// -------------------------------------------------------------- sliders
+
+let gainsPending = null;
+function pushGains() {
+  if (gainsPending) return;
+  gainsPending = setTimeout(() => {
+    gainsPending = null;
+    if (stateSocket && stateSocket.readyState === WebSocket.OPEN) {
+      stateSocket.send(JSON.stringify({
+        type: "gains",
+        lookahead_cm: state.lookahead,
+        alpha_dead_rad: state.alphaDead,
+      }));
+    }
+  }, 120);
+}
+
+$("s-ld").addEventListener("input", (event) => {
+  state.lookahead = parseFloat(event.target.value);
+  showGains();
+  pushGains();
+});
+$("s-alpha").addEventListener("input", (event) => {
+  state.alphaDead = parseFloat(event.target.value);
+  showGains();
+  pushGains();
+});
+
+// ----------------------------------------------------------------- log
+
+const logBody = $("log");
+const logScroll = $("log-scroll");
+
+function logRow(event) {
+  const row = document.createElement("tr");
+  const time = new Date().toLocaleTimeString([], { hour12: false });
+
+  if (event.type === "note") {
+    row.innerHTML =
+      `<td class="t">${time}</td><td class="note" colspan="4">` +
+      `${escapeHtml(event.note)}${event.detail ? " &mdash; " + escapeHtml(event.detail) : ""}</td>`;
+  } else {
+    const verdict = event.accepted
+      ? `<td class="ok">fired</td>`
+      : `<td class="no">rejected</td>`;
+    const why = event.reject_reason || event.detail || "";
+    row.innerHTML =
+      `<td class="t">${time}</td>` +
+      `<td>${escapeHtml(event.source || "-")}</td>` +
+      `<td>${escapeHtml(event.direction || "-")}</td>` +
+      verdict +
+      `<td class="t">${escapeHtml(why)}${event.n != null ? " (n=" + event.n + ")" : ""}</td>`;
+  }
+
+  const atBottom =
+    logScroll.scrollTop + logScroll.clientHeight >= logScroll.scrollHeight - 24;
+  logBody.appendChild(row);
+  while (logBody.children.length > 400) logBody.removeChild(logBody.firstChild);
+  if (atBottom) logScroll.scrollTop = logScroll.scrollHeight;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character]);
+}
+
+// ------------------------------------------------------------ readouts
+
+function applyState(message) {
+  if (message.trace_id !== state.traceId) {
+    // A different trace than the one this page has been accumulating, which
+    // is what a reconnect or another operator's draw looks like.
+    state.traceId = message.trace_id;
+    state.walked = [];
+  }
+  if (message.walked_head) {
+    state.walked.push(message.walked_head);
+    // The server counts what it holds; a page that joined late is short.
+    if (message.walked_count && state.walked.length > message.walked_count) {
+      state.walked = state.walked.slice(-message.walked_count);
+    }
+  }
+  state.roach = (message.x != null && message.y != null) ? [message.x, message.y] : null;
+  state.carrot = message.carrot_cm || null;
+  state.tracing = !!message.tracing;
+
+  $("r-n").textContent = message.n != null ? message.n : "-";
+  $("r-since").textContent =
+    message.since_stim_s == null ? "never" : message.since_stim_s.toFixed(1) + " s";
+
+  const refrac = $("r-refrac");
+  if (message.n == null) {
+    refrac.textContent = "no gate";
+    refrac.className = "v state-off";
+  } else if (message.refractory) {
+    refrac.textContent = "refractory";
+    refrac.className = "v state-refractory";
+  } else {
+    refrac.textContent = "ready";
+    refrac.className = "v state-ready";
+  }
+
+  $("r-pos").textContent = state.roach
+    ? `${state.roach[0].toFixed(1)}, ${state.roach[1].toFixed(1)} cm`
+    : (message.detected ? "filtering" : "not seen");
+  $("r-speed").textContent =
+    message.speed == null ? "-" : message.speed.toFixed(1) + " cm/s";
+  $("r-heading").textContent = message.heading_valid
+    ? ((message.theta * 180) / Math.PI).toFixed(0) + "°"
+    : "below v_min";
+  $("r-cross").textContent =
+    message.cross_track_cm == null ? "-" : message.cross_track_cm.toFixed(1) + " cm";
+
+  draw();
+}
+
+function applySnapshot(message) {
+  state.traceId = message.trace_id;
+  state.reference = message.reference_cm || [];
+  state.walked = message.walked_cm || [];
+  state.tracing = !!message.tracing;
+  if (message.lookahead_cm != null) {
+    state.lookahead = message.lookahead_cm;
+    $("s-ld").value = state.lookahead;
+  }
+  if (message.alpha_dead_rad != null) {
+    state.alphaDead = message.alpha_dead_rad;
+    $("s-alpha").value = state.alphaDead;
+  }
+  showGains();
+  for (const event of message.events || []) logRow(event);
+  draw();
+}
+
+// -------------------------------------------------------- the sockets
+
+function socketUrl(path) {
+  const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${scheme}//${location.host}${path}`;
+}
+
+let stateSocket = null;
+
+// An iPad that sleeps drops both sockets without closing them cleanly, and
+// the operator finds out by seeing stale numbers. Reconnecting on a fixed
+// delay means picking the tablet up is enough to bring the page back.
+function connect(path, { onMessage, onOpen, onClose }) {
+  let socket;
+  const open = () => {
+    socket = new WebSocket(socketUrl(path));
+    socket.binaryType = "blob";
+    socket.onopen = () => onOpen && onOpen(socket);
+    socket.onmessage = onMessage;
+    socket.onclose = () => {
+      if (onClose) onClose();
+      setTimeout(open, 1500);
+    };
+    socket.onerror = () => socket.close();
+  };
+  open();
+  return () => socket;
+}
+
+if (CONFIG.live) {
+  const videoImg = $("video");
+  const videoWrap = $("video-wrap");
+  let objectUrl = null;
+
+  connect("/ws/video", {
+    onMessage: (event) => {
+      if (typeof event.data === "string") {
+        const payload = JSON.parse(event.data);
+        $("video-msg").textContent = payload.detail || "no video";
+        return;
+      }
+      videoWrap.classList.remove("empty");
+      const next = URL.createObjectURL(event.data);
+      // Revoked only once the decoder has the new frame, or Safari shows gaps.
+      videoImg.onload = () => { if (objectUrl) URL.revokeObjectURL(objectUrl); objectUrl = next; };
+      videoImg.src = next;
+    },
+  });
+}
+
+connect("/ws/state", {
+  onOpen: (socket) => {
+    stateSocket = socket;
+    $("conn").textContent = "socket live";
+  },
+  onClose: () => {
+    stateSocket = null;
+    $("conn").textContent = "socket lost - retrying";
+  },
+  onMessage: (event) => {
+    const message = JSON.parse(event.data);
+    if (message.type === "state") applyState(message);
+    else if (message.type === "snapshot") applySnapshot(message);
+    else logRow(message);
+  },
+});
+
+// -------------------------------------------------------------- replay
+
+async function loadRuns() {
+  const picker = $("run-picker");
+  try {
+    const payload = await (await fetch("/api/runs")).json();
+    picker.innerHTML = "";
+    if (!payload.runs.length) {
+      $("replay-hint").textContent = `no runs under ${payload.root}`;
+      return;
+    }
+    for (const run of payload.runs) {
+      const option = document.createElement("option");
+      option.value = run.id;
+      option.textContent =
+        `${run.id} - ${run.traces} trace(s), ${run.stims_accepted}/${run.stims_total} fired`;
+      picker.appendChild(option);
+    }
+    picker.onchange = () => loadRun(picker.value);
+    await loadRun(picker.value);
+  } catch (error) {
+    $("replay-hint").textContent = String(error.message);
+  }
+}
+
+async function loadRun(runId) {
+  stopReplay();
+  const run = await (await fetch(`/api/runs/${encodeURIComponent(runId)}`)).json();
+  const trace = (run.traces || []).slice(-1)[0];
+  logBody.innerHTML = "";
+
+  if (!trace) {
+    state.reference = [];
+    state.walked = [];
+    $("replay-hint").textContent = `${run.track_points} tracked frames, no drawn path`;
+    draw();
+    return;
+  }
+
+  state.reference = trace.reference_cm || [];
+  state.walked = [];
+  state.replayRun = { trace, stims: run.stims || [] };
+  state.replayIndex = 0;
+  // No calibration is loaded in replay mode, so the arena comes from the run
+  // itself. A path is the only record of where the arena was.
+  state.arena = boundsOf([...(trace.reference_cm || []), ...(trace.walked_cm || [])]);
+  fitArena();
+  $("replay-hint").textContent =
+    `${(trace.walked_cm || []).length} points, ${(run.stims || []).length} requests`;
+  for (const stim of run.stims || []) logRow(stim);
+  draw();
+}
+
+function boundsOf(points) {
+  if (!points.length) return null;
+  const xs = points.map((p) => p[0]);
+  const ys = points.map((p) => p[1]);
+  const pad = 3;
+  return {
+    x_min: Math.min(...xs) - pad, x_max: Math.max(...xs) + pad,
+    y_min: Math.min(...ys) - pad, y_max: Math.max(...ys) + pad,
+  };
+}
+
+function stopReplay() {
+  if (state.replayTimer) clearInterval(state.replayTimer);
+  state.replayTimer = null;
+  $("play").textContent = "Play";
+}
+
+$("play").addEventListener("click", () => {
+  if (state.replayTimer) { stopReplay(); return; }
+  if (!state.replayRun) return;
+  const walked = state.replayRun.trace.walked_cm || [];
+  if (!walked.length) return;
+
+  if (state.replayIndex >= walked.length) { state.replayIndex = 0; state.walked = []; }
+  $("play").textContent = "Pause";
+  state.replayTimer = setInterval(() => {
+    if (state.replayIndex >= walked.length) { stopReplay(); return; }
+    state.walked.push(walked[state.replayIndex]);
+    state.roach = walked[state.replayIndex];
+    state.replayIndex += 1;
+    draw();
+  }, 33);
+});
+
+boot();
+resizeCanvas();
+</script>
+</body>
+</html>
