@@ -308,12 +308,15 @@ async def follow_path(
     policy: PathPolicy,
     max_steps: int,
     on_step: Callable[[StepLog], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[list[StepLog], bool]:
     if max_steps < 1:
         raise ValueError("max_steps must be at least 1")
     state = await env.reset()
     logs: list[StepLog] = []
     for step in range(1, max_steps + 1):
+        if should_stop is not None and should_stop():
+            return logs, False
         action = policy.act(state)
         next_state, reward, done = await env.step(action)
         policy.update(state, action, reward, next_state)
@@ -426,6 +429,7 @@ async def reversal(
     policy: TeachPolicy,
     max_steps: int,
     on_step: Callable[[StepLog, dict[str, float]], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[list[StepLog], dict[str, float], bool]:
     """Compatibility wrapper around the shared left-then-right teach loop."""
     progress = {phase: 0.0 for phase in REVERSAL_PHASES}
@@ -436,7 +440,9 @@ async def reversal(
         if on_step is not None:
             on_step(log, progress)
 
-    logs, success = await teach(env, policy, max_steps, on_step=report)
+    logs, success = await teach(
+        env, policy, max_steps, on_step=report, should_stop=should_stop
+    )
     return logs, progress, success
 
 

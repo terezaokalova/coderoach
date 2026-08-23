@@ -51,9 +51,11 @@ def test_log_names_match_their_owners():
     """
     from stim.gate import LOG_NAME as GATE_LOG_NAME
     from traj.track import LOG_NAME as TRACK_LOG_NAME
+    from web.experiment import STEPS_NAME
 
     assert runs.TRACK_LOG_NAME == TRACK_LOG_NAME
     assert runs.GATE_LOG_NAME == GATE_LOG_NAME
+    assert runs.RL_STEPS_NAME == STEPS_NAME
 
 
 def test_runs_module_imports_nothing_heavy():

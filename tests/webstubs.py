@@ -64,7 +64,7 @@ class StubGate:
         self.requests = []
         self.n = 0
 
-    async def request(self, direction, source, request_id):
+    async def request(self, direction, source, request_id, settings=None):
         self.requests.append((direction, source, request_id))
         index = min(len(self.requests) - 1, len(self.outcomes) - 1)
         outcome = self.outcomes[index]

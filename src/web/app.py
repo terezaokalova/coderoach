@@ -28,6 +28,17 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from web import runs
+from web.experiment import (
+    COMMANDS,
+    DEFAULT_MAX_STEPS,
+    DIRECTIONS,
+    POLICIES,
+    ExperimentRunner,
+    ExperimentSpec,
+    STOP_REPLACED as EXP_REPLACED,
+    STOP_REQUESTED as EXP_STOP,
+    STOP_SHUTDOWN as EXP_SHUTDOWN,
+)
 
 log = logging.getLogger(__name__)
 
@@ -185,6 +196,10 @@ class StimJournal:
             {"type": "note", "t": time.monotonic(), "note": note, "detail": detail}
         )
 
+    def emit(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Fan one event to the page. Used for stim, notes, and RL steps."""
+        return self._emit(event)
+
     def _emit(self, event: dict[str, Any]) -> dict[str, Any]:
         self._events.append(event)
         for queue in list(self._subscribers):
@@ -205,6 +220,7 @@ class Runtime:
         self.hub = None
         self.gate = None
         self.loop = None
+        self.experiment = None
         self.journal = StimJournal()
         self.status: dict[str, Capability] = {
             CAMERA: Capability(),
@@ -237,7 +253,11 @@ class Runtime:
                 run_dir=self.config.run_dir,
             )
 
+        self.experiment = ExperimentRunner(self)
+
     async def shutdown(self) -> None:
+        if self.experiment is not None:
+            await self.experiment.stop(EXP_SHUTDOWN)
         if self.loop is not None:
             from web.loop import STOP_SHUTDOWN
 
@@ -402,6 +422,7 @@ class Runtime:
             "alpha_dead_rad": self._gain_value("alpha_dead_rad"),
             "n": None if self.gate is None else self.gate.n,
             "events": self.journal.events,
+            "experiment": None if self.experiment is None else self.experiment.snapshot(),
         }
 
     def state_message(self, result) -> dict[str, Any]:
@@ -429,6 +450,7 @@ class Runtime:
             "alpha": None if decision is None else decision.alpha,
             "at_end": bool(decision is not None and decision.at_end),
             "reason": None if decision is None else decision.reason,
+            "experiment": None if self.experiment is None else self.experiment.status(),
         }
 
     def _gain_value(self, field_name: str) -> float:
@@ -681,6 +703,9 @@ def create_app(config: WebConfig) -> FastAPI:
             waypoints[-1][0],
             waypoints[-1][1],
         )
+        if runtime.experiment is not None:
+            await runtime.experiment.stop(EXP_REPLACED)
+
         await runtime.loop.start(waypoints, gains)
         runtime.journal.record_note(
             "tracing", f"{len(waypoints)} waypoints, {runtime.loop.length_cm:.1f} cm"
@@ -694,6 +719,31 @@ def create_app(config: WebConfig) -> FastAPI:
                 "alpha_dead_rad": gains.alpha_dead_rad,
             }
         )
+
+    @app.post("/api/experiment/start")
+    async def api_experiment_start(request: Request) -> JSONResponse:
+        spec = _parse_spec(await _json_body(request))
+        if runtime.loop is not None and runtime.loop.active:
+            from web.loop import STOP_REPLACED
+
+            await runtime.loop.stop(STOP_REPLACED)
+            runtime.journal.record_note("stopped", "path replaced by experiment")
+        await runtime.experiment.start(spec)
+        return JSONResponse(runtime.experiment.status())
+
+    @app.post("/api/experiment/stop")
+    async def api_experiment_stop() -> JSONResponse:
+        await runtime.experiment.stop(EXP_STOP)
+        runtime.journal.record_note("experiment stopped", None)
+        return JSONResponse({"stopped": True, **runtime.experiment.status()})
+
+    @app.post("/api/experiment/restart")
+    async def api_experiment_restart() -> JSONResponse:
+        try:
+            await runtime.experiment.restart()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return JSONResponse(runtime.experiment.status())
 
     @app.post("/api/stop")
     async def api_stop() -> JSONResponse:
@@ -728,6 +778,47 @@ def create_app(config: WebConfig) -> FastAPI:
         return JSONResponse(runs.read_run(_run_directory(config.runs_root, run_id)))
 
     return app
+
+
+def _parse_spec(body: dict[str, Any]) -> ExperimentSpec:
+    command = body.get("command")
+    if command not in COMMANDS:
+        raise HTTPException(
+            status_code=400, detail="command must be 'teach', 'reversal', or 'path'"
+        )
+    policy = body.get("policy", "bandit")
+    if policy not in POLICIES:
+        raise HTTPException(
+            status_code=400, detail="policy must be 'static', 'irregular', or 'bandit'"
+        )
+    direction = body.get("direction", "left")
+    if direction not in DIRECTIONS:
+        raise HTTPException(status_code=400, detail="direction must be 'left' or 'right'")
+    raw_steps = body.get("max_steps", DEFAULT_MAX_STEPS[command])
+    try:
+        max_steps = int(raw_steps)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="max_steps must be an integer") from exc
+    if max_steps < 1:
+        raise HTTPException(status_code=400, detail="max_steps must be at least 1")
+    waypoints = body.get("waypoints")
+    parsed = None
+    if waypoints is not None:
+        try:
+            parsed = tuple((float(x), float(y)) for x, y in waypoints)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400, detail="waypoints must be a list of [x, y]"
+            ) from exc
+        if not parsed:
+            raise HTTPException(status_code=400, detail="waypoints must be a list of [x, y]")
+    return ExperimentSpec(
+        command=command,
+        policy=policy,
+        direction=direction,
+        max_steps=max_steps,
+        waypoints=parsed,
+    )
 
 
 async def _json_body(request: Request) -> dict[str, Any]:

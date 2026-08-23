@@ -8,12 +8,11 @@ import math
 from contextlib import suppress
 
 from interface import RoboRoach, StimulationSettings
-from interface.plot import make_live_plot, run_with_dashboard
 
 from stim import StimGate
 
 from .env import SimWorld, StimAction, format_step
-from .policy import HeadingPolicy, make_teach_policy, status_text
+from .policy import HeadingPolicy, make_teach_policy
 from .teach import (
     AntiHabituationEnv,
     format_reversal_step,
@@ -61,16 +60,6 @@ async def open_gate(roach: RoboRoach, args) -> StimGate:
         settings=waveform(StimAction(direction="left"), args.gain_percent),
         run_dir=args.run_dir,
     )
-
-
-def uses_traj_tracker(args) -> bool:
-    """Our overhead tracker satisfies PoseTracker but not his plotting surface.
-
-    make_live_plot() wants set_box/view_rgb/status from the iPhone tracker, and
-    AsyncPoseTracker has none of them, so the dashboard is skipped rather than
-    half-wired. The run itself is unaffected; only the live window is missing.
-    """
-    return getattr(args, "pose_source", "sim") == "camera"
 
 
 async def open_pose_tracker(args):
@@ -179,32 +168,17 @@ async def run_live_teach(args: argparse.Namespace) -> None:
                 still_speed=args.still_speed,
             )
             env.max_still = 0
-            plot = None
-            if not args.no_plot and not uses_traj_tracker(args):
-                plot = make_live_plot(
-                    f"{args.policy}  state={pose}  stim=backpack",
-                    tracker,
-                    extra=lambda: status_text(policy),
-                )
 
             def on_step(log) -> None:
-                if plot is not None:
-                    plot.update(log)
                 print(format_teach_step(log), flush=True)
 
-            async def work():
-                return await teach(
-                    env,
-                    policy,
-                    max_steps=args.max_steps,
-                    on_step=on_step,
-                    should_stop=None if plot is None else plot.closed,
-                )
-
-            logs, success = await run_with_dashboard(plot, tracker, work)
+            logs, success = await teach(
+                env,
+                policy,
+                max_steps=args.max_steps,
+                on_step=on_step,
+            )
             print(summarize(logs, success))
-            if plot is not None:
-                plot.hold()
         except RuntimeError as exc:
             print(exc)
         except KeyboardInterrupt:
@@ -236,31 +210,17 @@ async def run_live_reversal(args: argparse.Namespace) -> None:
                 still_speed=args.still_speed,
             )
             env.max_still = 8
-            plot = None
-            if not args.no_plot and not uses_traj_tracker(args):
-                plot = make_live_plot(
-                    f"{args.policy}  reversal  state={pose}  stim=backpack",
-                    tracker,
-                    extra=lambda: status_text(policy),
-                )
 
             def on_step(log, progress: dict[str, float]) -> None:
-                if plot is not None:
-                    plot.update(log)
                 print(format_reversal_step(log, progress))
 
-            async def work():
-                return await reversal(
-                    env,
-                    policy,
-                    max_steps=args.max_steps,
-                    on_step=on_step,
-                )
-
-            logs, progress, success = await run_with_dashboard(plot, tracker, work)
+            logs, progress, success = await reversal(
+                env,
+                policy,
+                max_steps=args.max_steps,
+                on_step=on_step,
+            )
             print(summarize_reversal(logs, progress, success))
-            if plot is not None:
-                plot.hold()
         except RuntimeError as exc:
             print(exc)
         except KeyboardInterrupt:

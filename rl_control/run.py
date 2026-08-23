@@ -10,7 +10,7 @@ from pathlib import Path
 from interface.roboroach import MIN_STIM_INTERVAL_S, RoboRoach
 
 from .env import SimWorld, StimAction, format_step
-from .policy import HeadingPolicy, PathPolicy, make_teach_policy, status_text
+from .policy import HeadingPolicy, PathPolicy, make_teach_policy
 from .teach import (
     AntiHabituationEnv,
     follow_path,
@@ -172,49 +172,29 @@ def run_goal_sim(args: argparse.Namespace) -> None:
 
 async def run_teach_sim(args: argparse.Namespace) -> None:
     names = ("static", "irregular") if args.compare else (args.policy,)
-    plot = None
-    if not args.no_plot:
-        from interface.plot import LiveRunPlot
-
-        plot = LiveRunPlot(names[0])
     for name in names:
         env = AntiHabituationEnv.simulated(
             direction=args.direction, still_speed=args.still_speed
         )
         policy = make_teach_policy(name, direction=args.direction)
-        if plot is not None:
-            plot.extra = lambda current=policy: status_text(current)
-            plot.reset(name)
         logs, success = await teach(
             env,
             policy,
             max_steps=args.max_steps,
-            on_step=None if plot is None else plot.update,
         )
         print(f"policy {name}  state=sim  stim=silent")
         for log in logs:
             print(format_teach_step(log))
         print(summarize(logs, success))
         print()
-    if plot is not None:
-        plot.hold()
 
 
 async def run_reversal_sim(args: argparse.Namespace) -> None:
-    plot = None
-    if not args.no_plot:
-        from interface.plot import LiveRunPlot
-
-        plot = LiveRunPlot(args.policy)
     env = AntiHabituationEnv.simulated(still_speed=args.still_speed)
     env.max_still = 8
     policy = make_teach_policy(args.policy, direction="left")
-    if plot is not None:
-        plot.extra = lambda: status_text(policy)
 
     def on_step(log, progress: dict[str, float]) -> None:
-        if plot is not None:
-            plot.update(log)
         print(format_reversal_step(log, progress))
 
     logs, progress, success = await reversal(
@@ -225,14 +205,11 @@ async def run_reversal_sim(args: argparse.Namespace) -> None:
     )
     print(f"policy {args.policy}  state=sim  stim=silent")
     print(summarize_reversal(logs, progress, success))
-    if plot is not None:
-        plot.hold()
 
 
 async def run_camera_teach(args: argparse.Namespace) -> None:
     if args.compare:
         raise SystemExit("compare is simulation-only")
-    from interface.plot import make_live_plot, run_with_dashboard
     from interface.track import open_camera
 
     traj = args.pose_source == "camera"
@@ -251,13 +228,6 @@ async def run_camera_teach(args: argparse.Namespace) -> None:
         still_speed=args.still_speed,
     )
     env.max_still = 0
-    plot = None
-    if not args.no_plot and not traj:
-        plot = make_live_plot(
-            f"{args.policy}  state=camera  stim=silent",
-            tracker,
-            extra=lambda: status_text(policy),
-        )
     second = "right" if args.direction == "left" else "left"
     print(
         "Camera teach: pose from iPhone, no backpack pulse. "
@@ -265,21 +235,15 @@ async def run_camera_teach(args: argparse.Namespace) -> None:
     )
 
     def on_step(log) -> None:
-        if plot is not None:
-            plot.update(log)
         print(format_teach_step(log), flush=True)
 
-    async def work():
-        return await teach(
+    try:
+        logs, success = await teach(
             env,
             policy,
             max_steps=args.max_steps,
             on_step=on_step,
-            should_stop=None if plot is None else plot.closed,
         )
-
-    try:
-        logs, success = await run_with_dashboard(plot, tracker, work)
         print(summarize(logs, success))
     except RuntimeError as exc:
         print(exc)
@@ -352,7 +316,6 @@ def main() -> None:
         help="stop after this many pulses or after completing both turns",
     )
     teach_p.add_argument("--live", action="store_true")
-    teach_p.add_argument("--no-plot", action="store_true")
     teach_p.add_argument("--cooldown", type=float, default=2.0)
     teach_p.add_argument("--timeout", type=float, default=10.0)
     add_camera_args(teach_p)
@@ -370,7 +333,6 @@ def main() -> None:
     )
     rev_p.add_argument("--max-steps", type=int, default=30)
     rev_p.add_argument("--live", action="store_true")
-    rev_p.add_argument("--no-plot", action="store_true")
     rev_p.add_argument("--cooldown", type=float, default=2.0)
     rev_p.add_argument("--timeout", type=float, default=10.0)
     add_camera_args(rev_p)

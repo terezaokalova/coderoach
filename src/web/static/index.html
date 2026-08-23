@@ -147,6 +147,21 @@ td.note { color: var(--dim); font-style: italic; }
 .legend { display: flex; gap: 14px; font-size: 12px; color: var(--dim); }
 .legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px;
   vertical-align: middle; margin-right: 5px; }
+.field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.field label { font-size: 11px; letter-spacing: .09em; text-transform: uppercase; color: var(--dim); }
+.field select, .field input[type=number] {
+  font: inherit; background: #262b37; color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px; width: 100%;
+}
+.charts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.chart { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+.chart h2 { margin-bottom: 4px; }
+.chart canvas { width: 100%; height: 88px; display: block; }
+#policy-text {
+  margin: 8px 0 0; padding: 8px; background: #0d0f14; border-radius: 8px;
+  font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--ink); white-space: pre-wrap; max-height: 140px; overflow: auto;
+}
 #replay { display: none; }
 #replay.on { display: block; }
 select { font: inherit; background: #262b37; color: var(--ink);
@@ -183,9 +198,60 @@ select { font: inherit; background: #262b37; color: var(--ink);
         <span class="hint" id="canvas-hint">draw with a finger or Pencil</span>
       </div>
     </div>
+
+    <div class="charts">
+      <div class="chart"><h2>Reward</h2><canvas id="c-reward"></canvas></div>
+      <div class="chart"><h2>Motion</h2><canvas id="c-motion"></canvas></div>
+      <div class="chart"><h2>Stimulation</h2><canvas id="c-stim"></canvas></div>
+      <div class="chart"><h2>Heading</h2><canvas id="c-heading"></canvas></div>
+    </div>
   </div>
 
   <aside class="right">
+    <div class="panel">
+      <h2>Experiment</h2>
+      <div class="field">
+        <label for="exp-command">command</label>
+        <select id="exp-command">
+          <option value="teach">teach</option>
+          <option value="reversal">reversal</option>
+          <option value="path">path</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="exp-policy">policy</label>
+        <select id="exp-policy">
+          <option value="bandit">bandit</option>
+          <option value="static">static</option>
+          <option value="irregular">irregular</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="exp-direction">direction</label>
+        <select id="exp-direction">
+          <option value="left">left</option>
+          <option value="right">right</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="exp-steps">max steps</label>
+        <input id="exp-steps" type="number" min="1" value="150">
+      </div>
+      <div class="stack">
+        <button id="exp-start" class="primary">Start</button>
+        <div class="turns">
+          <button id="exp-stop" disabled>Stop</button>
+          <button id="exp-restart" disabled>Restart</button>
+        </div>
+      </div>
+      <div class="readout"><span class="k">episode</span><span class="v" id="r-ep">-</span></div>
+      <div class="readout"><span class="k">step</span><span class="v" id="r-step">-</span></div>
+      <div class="readout"><span class="k">phase</span><span class="v" id="r-phase">-</span></div>
+      <div class="readout"><span class="k">left / right</span><span class="v" id="r-turns">-</span></div>
+      <div class="readout"><span class="k">reward</span><span class="v" id="r-rew">-</span></div>
+      <div class="readout"><span class="k">pulse</span><span class="v" id="r-pulse">-</span></div>
+      <pre id="policy-text"></pre>
+    </div>
     <div class="panel">
       <h2>Stimulate</h2>
       <div class="stack">
@@ -267,6 +333,11 @@ const state = {
   replayTimer: null,
   lookahead: CONFIG.lookahead_cm,
   alphaDead: CONFIG.alpha_dead_rad,
+  experimentRunning: false,
+  episode: 0,
+  lastSpec: null,
+  rlSteps: [],
+  headingRad: null,
 };
 
 // ---------------------------------------------------------------- chrome
@@ -300,6 +371,11 @@ function boot() {
   $("s-ld").value = state.lookahead;
   $("s-alpha").value = state.alphaDead;
   showGains();
+  $("exp-command").addEventListener("change", () => {
+    const defaults = { teach: 150, reversal: 30, path: 40 };
+    $("exp-steps").value = defaults[$("exp-command").value] || 150;
+  });
+  syncControls();
 }
 
 // POST /api/path needs both the camera and the backpack, so Send has to be
@@ -319,7 +395,7 @@ function sendBlockedBy() {
 function refreshSend() {
   const blocked = sendBlockedBy();
   const button = $("send");
-  button.disabled = blocked !== null || state.stroke.length < 2;
+  button.disabled = blocked !== null || state.experimentRunning || state.stroke.length < 2;
   button.title = blocked || "send the drawn path to the control loop";
   if (blocked) $("canvas-hint").textContent = blocked;
 }
@@ -392,7 +468,10 @@ function draw() {
   polyline(state.walked, "var(--walked)", 2);
   polyline(state.stroke, "var(--stroke)", 2.5, true);
   if (state.carrot) dot(state.carrot, "var(--reference)", 5, true);
-  if (state.roach) dot(state.roach, "var(--roach)", 6, false);
+  if (state.roach) {
+    dot(state.roach, "var(--roach)", 6, false);
+    if (state.headingRad != null) headingTick(state.roach, state.headingRad);
+  }
 }
 
 function scaled(value) { return value * (window.devicePixelRatio || 1); }
@@ -474,8 +553,14 @@ function isPalm(event) {
          (performance.now() - penSeenAt) < PEN_GRACE_MS;
 }
 
+function headingTick(point, heading) {
+  const len = 4;
+  const tip = [point[0] + len * Math.cos(heading), point[1] + len * Math.sin(heading)];
+  polyline([point, tip], "var(--roach)", 1.5);
+}
+
 function drawingAllowed() {
-  return CONFIG.live && view.ready;
+  return CONFIG.live && view.ready && !state.experimentRunning;
 }
 
 canvas.addEventListener("pointerdown", (event) => {
@@ -581,8 +666,8 @@ async function guarded(button, work) {
       detail: String(error.message),
     });
   } finally {
-    button.disabled = false;
     button.textContent = label;
+    syncControls();
   }
 }
 
@@ -621,7 +706,56 @@ $("send").addEventListener("click", (e) => guarded(e.target, async () => {
   state.traceId = reply.trace_id;
   state.stroke = [];
   state.tracing = true;
+  state.experimentRunning = false;
+  syncControls();
+  draw();
+}));
+
+const STEP_DEFAULTS = { teach: 150, reversal: 30, path: 40 };
+
+function experimentSpec() {
+  return {
+    command: $("exp-command").value,
+    policy: $("exp-policy").value,
+    direction: $("exp-direction").value,
+    max_steps: parseInt($("exp-steps").value, 10) || STEP_DEFAULTS.teach,
+  };
+}
+
+function syncControls() {
+  const running = state.experimentRunning;
+  $("exp-start").disabled = state.tracing || running;
+  $("exp-stop").disabled = !running;
+  $("exp-restart").disabled = !state.lastSpec;
   refreshSend();
+}
+
+$("exp-start").addEventListener("click", (e) => guarded(e.target, async () => {
+  const spec = experimentSpec();
+  const reply = await call("/api/experiment/start", spec);
+  state.lastSpec = spec;
+  applyRlStatus(reply);
+  state.rlSteps = [];
+  state.walked = [];
+  state.tracing = false;
+  drawCharts();
+  syncControls();
+  draw();
+}));
+
+$("exp-stop").addEventListener("click", (e) => guarded(e.target, async () => {
+  const reply = await call("/api/experiment/stop");
+  applyRlStatus(reply);
+  syncControls();
+}));
+
+$("exp-restart").addEventListener("click", (e) => guarded(e.target, async () => {
+  const reply = await call("/api/experiment/restart");
+  state.rlSteps = [];
+  state.walked = [];
+  applyRlStatus(reply);
+  drawCharts();
+  syncControls();
   draw();
 }));
 
@@ -662,7 +796,17 @@ function logRow(event) {
   const row = document.createElement("tr");
   const time = new Date().toLocaleTimeString([], { hour12: false });
 
-  if (event.type === "note") {
+  if (event.type === "rl_step") {
+    row.innerHTML =
+      `<td class="t">${time}</td><td class="note" colspan="4">` +
+      `rl ${event.step} ${escapeHtml(event.direction || "")} ` +
+      `r=${Number(event.reward).toFixed(2)}</td>`;
+  } else if (event.type === "rl_status") {
+    const label = event.running ? "running" : (event.success == null ? "idle" : (event.success ? "success" : "incomplete"));
+    row.innerHTML =
+      `<td class="t">${time}</td><td class="note" colspan="4">` +
+      `experiment ${escapeHtml(event.command || "-")} episode ${event.episode} ${label}</td>`;
+  } else if (event.type === "note") {
     row.innerHTML =
       `<td class="t">${time}</td><td class="note" colspan="4">` +
       `${escapeHtml(event.note)}${event.detail ? " &mdash; " + escapeHtml(event.detail) : ""}</td>`;
@@ -739,6 +883,8 @@ function applyState(message) {
   $("r-cross").textContent =
     message.cross_track_cm == null ? "-" : message.cross_track_cm.toFixed(1) + " cm";
 
+  if (message.experiment) applyRlStatus(message.experiment);
+  syncControls();
   draw();
 }
 
@@ -757,7 +903,133 @@ function applySnapshot(message) {
   }
   showGains();
   for (const event of message.events || []) logRow(event);
+  if (message.experiment) {
+    applyRlStatus(message.experiment);
+    if (message.experiment.steps && message.experiment.steps.length) {
+      state.rlSteps = message.experiment.steps;
+      state.walked = state.rlSteps.map((s) => [s.x, s.y]);
+      const last = state.rlSteps[state.rlSteps.length - 1];
+      state.roach = [last.x, last.y];
+      state.headingRad = last.heading_rad;
+    }
+  }
+  drawCharts();
+  syncControls();
   draw();
+}
+
+function applyRlStatus(status) {
+  if (!status) return;
+  if (status.episode && status.episode !== state.episode && !status.running) {
+    // keep series after a finished episode
+  }
+  if (status.episode && status.episode !== state.episode && status.running) {
+    state.rlSteps = [];
+    state.walked = [];
+  }
+  if (status.episode) state.episode = status.episode;
+  state.experimentRunning = !!status.running;
+  if (status.command) $("exp-command").value = status.command;
+  if (status.policy) $("exp-policy").value = status.policy;
+  if (status.direction) $("exp-direction").value = status.direction;
+  $("r-ep").textContent = status.episode ? String(status.episode) : "-";
+  $("r-step").textContent = status.step != null ? String(status.step) : "-";
+  const left = status.left_rad == null ? 0 : status.left_rad * 180 / Math.PI;
+  const right = status.right_rad == null ? 0 : status.right_rad * 180 / Math.PI;
+  $("r-turns").textContent = `${left.toFixed(0)}/180  ${right.toFixed(0)}/180`;
+  if (status.policy_text) $("policy-text").textContent = status.policy_text;
+  if (status.running && status.command) state.lastSpec = state.lastSpec || {
+    command: status.command, policy: status.policy, direction: status.direction,
+  };
+  syncControls();
+}
+
+function applyRlStep(step, redraw) {
+  if (step.episode && step.episode !== state.episode) {
+    state.episode = step.episode;
+    state.rlSteps = [];
+    state.walked = [];
+  }
+  state.rlSteps.push(step);
+  if (step.x != null && step.y != null) {
+    state.walked.push([step.x, step.y]);
+    state.roach = [step.x, step.y];
+    state.headingRad = step.heading_rad;
+    if (!CONFIG.arena) {
+      state.arena = boundsOf(state.walked);
+      fitArena();
+    }
+  }
+  $("r-step").textContent = String(step.step);
+  $("r-phase").textContent = step.warmup ? "warm" : (step.direction || "-");
+  $("r-rew").textContent = Number(step.reward).toFixed(2);
+  $("r-pulse").textContent =
+    `${step.direction} ${step.frequency_hz} Hz ${step.duration_ms} ms`;
+  if (step.policy_text) $("policy-text").textContent = step.policy_text;
+  const left = (step.left_rad || 0) * 180 / Math.PI;
+  const right = (step.right_rad || 0) * 180 / Math.PI;
+  $("r-turns").textContent = `${left.toFixed(0)}/180  ${right.toFixed(0)}/180`;
+  if (redraw !== false) {
+    drawCharts();
+    draw();
+  }
+}
+
+function sizeChart(canvas) {
+  const ratio = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.round(rect.width * ratio));
+  canvas.height = Math.max(1, Math.round(rect.height * ratio));
+  return canvas.getContext("2d");
+}
+
+function drawSeries(canvas, series) {
+  const ctx = sizeChart(canvas);
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  if (!series.some((s) => s.values.length)) return;
+  const pad = 6 * (window.devicePixelRatio || 1);
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const line of series) {
+    for (const value of line.values) {
+      if (value < lo) lo = value;
+      if (value > hi) hi = value;
+    }
+  }
+  if (!(hi > lo)) { hi = lo + 1; lo = lo - 1; }
+  for (const line of series) {
+    if (line.values.length < 2) continue;
+    ctx.strokeStyle = line.color;
+    ctx.lineWidth = 1.5 * (window.devicePixelRatio || 1);
+    ctx.beginPath();
+    line.values.forEach((value, index) => {
+      const x = pad + (index / (line.values.length - 1)) * (w - 2 * pad);
+      const y = h - pad - ((value - lo) / (hi - lo)) * (h - 2 * pad);
+      index === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+}
+
+function drawCharts() {
+  const steps = state.rlSteps;
+  drawSeries($("c-reward"), [{ values: steps.map((s) => s.reward), color: "#66e0a3" }]);
+  drawSeries($("c-motion"), [
+    { values: steps.map((s) => s.speed), color: "#7db8ff" },
+    { values: steps.map((s) => Math.abs(s.turn_rate_rad)), color: "#ff9838" },
+    { values: steps.map((s) => s.still_steps), color: "#8d94a6" },
+  ]);
+  drawSeries($("c-stim"), [
+    { values: steps.map((s) => s.frequency_hz), color: "#7db8ff" },
+    { values: steps.map((s) => s.duration_ms), color: "#ff9838" },
+  ]);
+  drawSeries($("c-heading"), [
+    { values: steps.map((s) => s.heading_rad * 180 / Math.PI), color: "#46d8ff" },
+    { values: steps.map((s) => s.vx), color: "#7db8ff" },
+    { values: steps.map((s) => s.vy), color: "#ff9838" },
+  ]);
 }
 
 // -------------------------------------------------------- the sockets
@@ -823,6 +1095,8 @@ connect("/ws/state", {
     const message = JSON.parse(event.data);
     if (message.type === "state") applyState(message);
     else if (message.type === "snapshot") applySnapshot(message);
+    else if (message.type === "rl_step") applyRlStep(message);
+    else if (message.type === "rl_status") { applyRlStatus(message); logRow(message); }
     else logRow(message);
   },
 });
@@ -842,7 +1116,7 @@ async function loadRuns() {
       const option = document.createElement("option");
       option.value = run.id;
       option.textContent =
-        `${run.id} - ${run.traces} trace(s), ${run.stims_accepted}/${run.stims_total} fired`;
+        `${run.id} - ${run.traces} trace(s), ${run.steps || 0} steps, ${run.stims_accepted}/${run.stims_total} fired`;
       picker.appendChild(option);
     }
     picker.onchange = () => loadRun(picker.value);
@@ -856,9 +1130,12 @@ async function loadRun(runId) {
   stopReplay();
   const run = await (await fetch(`/api/runs/${encodeURIComponent(runId)}`)).json();
   const trace = (run.traces || []).slice(-1)[0];
+  const steps = run.steps || [];
   logBody.innerHTML = "";
+  state.rlSteps = steps;
+  drawCharts();
 
-  if (!trace) {
+  if (!trace && !steps.length) {
     state.reference = [];
     state.walked = [];
     $("replay-hint").textContent = `${run.track_points} tracked frames, no drawn path`;
@@ -866,16 +1143,19 @@ async function loadRun(runId) {
     return;
   }
 
-  state.reference = trace.reference_cm || [];
+  const walked = steps.length
+    ? steps.map((s) => [s.x, s.y])
+    : (trace && trace.walked_cm) || [];
+  state.reference = (trace && trace.reference_cm) || [];
   state.walked = [];
-  state.replayRun = { trace, stims: run.stims || [] };
+  state.replayRun = { trace: { walked_cm: walked, reference_cm: state.reference }, stims: run.stims || [], steps };
   state.replayIndex = 0;
   // No calibration is loaded in replay mode, so the arena comes from the run
   // itself. A path is the only record of where the arena was.
-  state.arena = boundsOf([...(trace.reference_cm || []), ...(trace.walked_cm || [])]);
+  state.arena = boundsOf([...state.reference, ...walked]);
   fitArena();
   $("replay-hint").textContent =
-    `${(trace.walked_cm || []).length} points, ${(run.stims || []).length} requests`;
+    `${walked.length} points, ${steps.length} steps, ${(run.stims || []).length} requests`;
   for (const stim of run.stims || []) logRow(stim);
   draw();
 }

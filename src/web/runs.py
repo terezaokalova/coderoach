@@ -25,6 +25,7 @@ PATH_NAME = "path.json"
 # emptying replay over here.
 TRACK_LOG_NAME = "traj_track.jsonl"
 GATE_LOG_NAME = "stim_gate.jsonl"
+RL_STEPS_NAME = "rl_steps.jsonl"
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -102,7 +103,10 @@ def list_runs(root: Path | str) -> list[dict[str, Any]]:
     for entry in root.iterdir():
         if not entry.is_dir():
             continue
-        summary = summarise_run(entry)
+        try:
+            summary = summarise_run(entry)
+        except OSError:
+            continue
         if summary is not None:
             runs.append(summary)
     runs.sort(key=lambda run: run["modified"], reverse=True)
@@ -114,13 +118,15 @@ def summarise_run(run_dir: Path) -> dict[str, Any] | None:
     path_file = run_dir / PATH_NAME
     track_file = run_dir / TRACK_LOG_NAME
     gate_file = run_dir / GATE_LOG_NAME
+    steps_file = run_dir / RL_STEPS_NAME
 
-    present = [f for f in (path_file, track_file, gate_file) if f.exists()]
+    present = [f for f in (path_file, track_file, gate_file, steps_file) if f.exists()]
     if not present:
         return None
 
     traces = _load_document(path_file)["traces"] if path_file.exists() else []
     stims = read_jsonl(gate_file)
+    steps = read_jsonl(steps_file)
     return {
         "id": run_dir.name,
         "modified": max(f.stat().st_mtime for f in present),
@@ -128,6 +134,7 @@ def summarise_run(run_dir: Path) -> dict[str, Any] | None:
         "stims_accepted": sum(1 for row in stims if row.get("accepted")),
         "stims_total": len(stims),
         "has_track": track_file.exists(),
+        "steps": len(steps),
     }
 
 
@@ -137,6 +144,7 @@ def read_run(run_dir: Path | str) -> dict[str, Any]:
     document = _load_document(run_dir / PATH_NAME)
     track = read_jsonl(run_dir / TRACK_LOG_NAME)
     stims = read_jsonl(run_dir / GATE_LOG_NAME)
+    steps = read_jsonl(run_dir / RL_STEPS_NAME)
 
     traces = []
     for trace in document["traces"]:
@@ -153,6 +161,7 @@ def read_run(run_dir: Path | str) -> dict[str, Any]:
         "traces": traces,
         "stims": stims,
         "track_points": len(track),
+        "steps": steps,
     }
 
 
