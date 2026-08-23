@@ -388,13 +388,11 @@ def build_split_datasets(
     def load_many(ids: tuple[str, ...]) -> list[SessionArrays]:
         return [load_session_arrays(cfg, sid) for sid in ids]
 
-    # Train pool = train_sessions (+ optional val_sessions).
-    # Test sessions: first half joins train/val; second half is held-out test.
+    # Optional extra pool sessions, plus test-session first half for train/val.
+    # Empty train_sessions means same-session only: first half train/val, second half test.
     pool_ids = tuple(
         dict.fromkeys([*split_cfg.train_sessions, *split_cfg.val_sessions])
     )
-    if not pool_ids:
-        raise ValueError("session protocol needs train_sessions (and/or val_sessions)")
     if not split_cfg.test_sessions:
         raise ValueError(
             "session protocol needs test_sessions for the half-session holdout"

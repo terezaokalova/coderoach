@@ -14,16 +14,14 @@ data:
 
 split:
   protocol: session  # temporal | session
-  # Pool sessions: chronological train/val. Test session: first half train/val,
-  # second half fully held-out test.
+  # Same-session: first half of test_sessions is train/val, second half is test.
+  # Add ids under train_sessions to mix in other recordings.
   train_frac: 0.85
   val_frac: 0.15
   test_frac: 0.0
   guard_s: 2.0
-  train_sessions:
-    - SD11_rec_20260817_153507.zarr
-    - SD11_rec_20260820_182314.zarr
-  val_sessions: []  # unused; val is a later time block in pool + test first half
+  train_sessions: []
+  val_sessions: []
   test_sessions:
     - SD11_rec_20260820_182553.zarr
 
@@ -49,4 +47,4 @@ train:
   device: auto  # auto | cpu | cuda | mps
   checkpoint_dir: checkpoints/pose_decoder
   time_shift_bins: 25  # ~0.5 s control at 20 ms bins
-  adv_weight: 0.1
+  adv_weight: 0.0

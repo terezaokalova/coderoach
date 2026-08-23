@@ -61,7 +61,8 @@ def test_load_pose_decoder_config(tmp_path: Path):
     assert cfg.model.n_layers == 3
     assert cfg.model.dilations == (1, 2, 4)
     assert cfg.model.dropout == 0.2
-    assert cfg.train.adv_weight == 0.1
+    assert cfg.train.adv_weight == 0.0
+    assert cfg.split.train_sessions == ()
     assert cfg.split.protocol == "session"
     assert cfg.split.test_frac == 0.0
     assert cfg.split.test_sessions == ("SD11_rec_20260820_182553.zarr",)

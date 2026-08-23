@@ -218,8 +218,8 @@ def load_pose_decoder_config(path: str | Path) -> PoseDecoderConfig:
     val_frac = float(split_raw["val_frac"])
     test_frac = float(split_raw["test_frac"])
     if protocol == "session":
-        # Pool sessions are chronological train/val. Test sessions: first half
-        # joins that split; second half is the held-out test block.
+        # Test sessions: first half is train/val, second half is held-out test.
+        # Optional train_sessions are extra pool recordings.
         if abs(train_frac + val_frac - 1.0) > 1e-6:
             raise ValueError(
                 "session protocol requires train_frac + val_frac == 1 "
