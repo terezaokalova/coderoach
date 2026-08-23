@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import math
 import random
+from dataclasses import dataclass
 from typing import Protocol
+
+from interface.roboroach import DEFAULT_DURATION_MS, DEFAULT_FREQUENCY_HZ
 
 from .env import (
     MovementState,
@@ -136,49 +139,144 @@ class IrregularPulsePolicy:
         return None
 
 
-class NoveltyBandit:
-    """Tiny learner: epsilon-greedy over freq/duration, with a repeat penalty.
+@dataclass(frozen=True)
+class BanditTrial:
+    direction: str
+    frequency_hz: int
+    duration_ms: int
+    reward: float
+    turned: bool
 
-    Repeating a pulse tanks later reward in the habituating sim, so the bandit
-    is pushed toward an irregular schedule without that schedule being hardcoded.
+
+class NoveltyBandit:
+    """Q-informed Bayesian bandit with separate evidence for left and right.
+
+    Q tracks continuous reward for each pair. Beta posteriors track whether each
+    frequency and duration produced a credited turn. Their mean log-odds tempers
+    the naive independence assumption because both factors share each trial.
     """
 
     def __init__(
         self,
-        freqs: tuple[int, ...] = (2, 5, 8, 10),
-        durations: tuple[int, ...] = (200, 250, 300),
+        freqs: tuple[int, ...] = (1, 2, 4, 6, 8, 10),
+        durations: tuple[int, ...] = (200, 225, 250, 275, 300),
         direction: str = "left",
-        epsilon: float = 0.35,
-        alpha: float = 0.35,
-        repeat_penalty: float = 0.45,
+        temperature: float = 1.8,
+        temp_min: float = 0.25,
+        temp_decay: float = 0.97,
+        stuck_temperature: float = 1.2,
+        alpha: float = 0.55,
+        bayes_weight: float = 0.45,
+        repeat_penalty: float = 0.5,
         seed: int = 0,
     ) -> None:
         self.actions = [_pulse(f, d, direction) for f in freqs for d in durations]
-        self.q = [0.0] * len(self.actions)
-        self.epsilon = epsilon
+        self.direction = direction
+        self.q = {side: [0.0] * len(self.actions) for side in ("left", "right")}
+        factors = tuple(("frequency", f) for f in freqs) + tuple(
+            ("duration", d) for d in durations
+        )
+        self.factor_trials = {
+            side: {factor: 0 for factor in factors} for side in ("left", "right")
+        }
+        self.factor_successes = {
+            side: {factor: 0 for factor in factors} for side in ("left", "right")
+        }
+        self.history: list[BanditTrial] = []
+        self.temperature = temperature
+        self.temp_min = temp_min
+        self.temp_decay = temp_decay
+        self.stuck_temperature = stuck_temperature
         self.alpha = alpha
+        self.bayes_weight = bayes_weight
         self.repeat_penalty = repeat_penalty
+        self._indices = {
+            (action.frequency_hz, action.duration_ms): i
+            for i, action in enumerate(self.actions)
+        }
+        self._start = next(
+            (
+                i
+                for i, action in enumerate(self.actions)
+                if action.frequency_hz == DEFAULT_FREQUENCY_HZ
+                and action.duration_ms == DEFAULT_DURATION_MS
+            ),
+            0,
+        )
+        for values in self.q.values():
+            values[self._start] = 0.5
         self._last = -1
+        self._n = 0
+        self._temp = temperature
         self._rng = random.Random(seed)
+
+    def reheat(self, direction: str | None = None) -> None:
+        if direction is not None:
+            self.direction = direction
+        self._n = 0
+        self._temp = self.temperature
+        self._last = -1
 
     def _similarity(self, i: int, j: int) -> float:
         a = self.actions[i]
         b = self.actions[j]
-        freq_n = abs(a.frequency_hz - b.frequency_hz) / 90.0
-        dur_n = abs(a.duration_ms - b.duration_ms) / 550.0
+        freq_n = abs(a.frequency_hz - b.frequency_hz) / 9.0
+        dur_n = abs(a.duration_ms - b.duration_ms) / 100.0
         return max(0.0, 1.0 - freq_n - dur_n)
 
+    def success_probability(
+        self, action: StimAction, direction: str | None = None
+    ) -> float:
+        side = direction or self.direction
+        keys = (
+            ("frequency", action.frequency_hz),
+            ("duration", action.duration_ms),
+        )
+        probabilities = [
+            (self.factor_successes[side][key] + 1) / (self.factor_trials[side][key] + 2)
+            for key in keys
+        ]
+        log_odds = sum(
+            math.log(probability / (1.0 - probability)) for probability in probabilities
+        ) / len(probabilities)
+        return 1.0 / (1.0 + math.exp(-log_odds))
+
+    def _scores(self) -> list[float]:
+        scored = []
+        for i, value in enumerate(self.q[self.direction]):
+            penalty = 0.0
+            if self._last >= 0:
+                penalty = self.repeat_penalty * self._similarity(i, self._last)
+            bayes = self.bayes_weight * (
+                2.0 * self.success_probability(self.actions[i]) - 1.0
+            )
+            scored.append(value + bayes - penalty)
+        return scored
+
+    def _softmax_sample(self, scores: list[float], temperature: float) -> int:
+        peak = max(scores)
+        weights = [
+            math.exp((score - peak) / max(temperature, 1e-3)) for score in scores
+        ]
+        pick = self._rng.random() * sum(weights)
+        acc = 0.0
+        last = 0
+        for i, weight in enumerate(weights):
+            acc += weight
+            last = i
+            if pick <= acc:
+                return i
+        return last
+
     def act(self, state: MovementState) -> StimAction:
-        if self._rng.random() < self.epsilon:
-            index = self._rng.randrange(len(self.actions))
-        else:
-            scored = []
-            for i, value in enumerate(self.q):
-                penalty = 0.0
-                if self._last >= 0:
-                    penalty = self.repeat_penalty * self._similarity(i, self._last)
-                scored.append(value - penalty)
-            index = max(range(len(scored)), key=scored.__getitem__)
+        self._n += 1
+        temperature = max(
+            self.temp_min, self.temperature * (self.temp_decay ** (self._n - 1))
+        )
+        if state.still_steps > 0 or (state.speed < 0.03 and state.last_frequency_hz):
+            temperature = max(temperature, self.stuck_temperature)
+        self._temp = temperature
+        index = self._softmax_sample(self._scores(), temperature)
         self._last = index
         return self.actions[index]
 
@@ -189,10 +287,27 @@ class NoveltyBandit:
         reward: float,
         next_state: MovementState,
     ) -> None:
-        index = self._last
-        if index < 0:
+        side = action.direction
+        if side not in self.q:
             return
-        self.q[index] += self.alpha * (reward - self.q[index])
+        index = self._indices[(action.frequency_hz, action.duration_ms)]
+        turned = reward > 0.3 * next_state.speed + 1e-9
+        self.q[side][index] += self.alpha * (reward - self.q[side][index])
+        for factor in (
+            ("frequency", action.frequency_hz),
+            ("duration", action.duration_ms),
+        ):
+            self.factor_trials[side][factor] += 1
+            self.factor_successes[side][factor] += int(turned)
+        self.history.append(
+            BanditTrial(
+                direction=side,
+                frequency_hz=action.frequency_hz,
+                duration_ms=action.duration_ms,
+                reward=reward,
+                turned=turned,
+            )
+        )
 
 
 class PathPolicy:
@@ -236,9 +351,12 @@ class PathPolicy:
         error = self.observe(state).heading_error_rad
         if abs(error) <= self.deadband_rad:
             return StimAction("wait", frequency_hz=0, pulse_width_ms=0, duration_ms=0)
+        direction = "left" if error > 0 else "right"
+        if isinstance(self.inner, NoveltyBandit):
+            self.inner.direction = direction
         pulse = self.inner.act(state)
         return StimAction(
-            direction="left" if error > 0 else "right",
+            direction=direction,
             frequency_hz=pulse.frequency_hz,
             pulse_width_ms=pulse.pulse_width_ms,
             duration_ms=pulse.duration_ms,
@@ -274,15 +392,22 @@ def make_teach_policy(name: str, direction: str = "left"):
 def status_text(policy) -> str:
     inner = policy.inner if isinstance(policy, PathPolicy) else policy
     if isinstance(inner, NoveltyBandit):
+        q = inner.q[inner.direction]
         rows = [
-            f"bandit  eps {inner.epsilon:.2f}  a {inner.alpha:.2f}",
-            f"repeat pen {inner.repeat_penalty:.2f}",
+            f"bandit {inner.direction}  T {inner._temp:.2f}  a {inner.alpha:.2f}  "
+            f"{len(inner.actions)} arms",
+            f"history {len(inner.history)}  repeat pen {inner.repeat_penalty:.2f}",
         ]
-        for i, (action, q) in enumerate(zip(inner.actions, inner.q)):
+        ranked = sorted(range(len(inner.actions)), key=lambda i: q[i], reverse=True)
+        show = ranked[:8]
+        if inner._last >= 0 and inner._last not in show:
+            show.append(inner._last)
+        for i in show:
+            action = inner.actions[i]
             mark = "*" if i == inner._last else " "
             rows.append(
                 f"{mark}{action.frequency_hz:2d} Hz {action.duration_ms:3d} ms  "
-                f"Q {q:+.2f}"
+                f"Q {q[i]:+.2f}  P {inner.success_probability(action):.2f}"
             )
         return "\n".join(rows)
     if isinstance(inner, IrregularPulsePolicy):

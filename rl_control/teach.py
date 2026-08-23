@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from interface.camera import Pose, PoseTracker, SimulatedCamera
+from interface.roboroach import DEFAULT_DURATION_MS, DEFAULT_FREQUENCY_HZ
 
 from .env import (
     MovementState,
@@ -144,7 +145,7 @@ class AntiHabituationEnv:
                 tracker=tracker,
                 stimulator=stimulator,
                 direction=direction,
-                still_speed=0.01,
+                still_speed=0.03,
                 max_still=12,
             )
         animal = HabituatingAnimal()
@@ -227,6 +228,10 @@ class StepLog:
     state: MovementState
     action: StimAction
     reward: float
+    progress_rad: float = 0.0
+    left_rad: float = 0.0
+    right_rad: float = 0.0
+    warmup: bool = False
 
 
 class TeachPolicy(Protocol):
@@ -243,6 +248,21 @@ class TeachPolicy(Protocol):
 
 TURN_TARGET_RAD = math.pi
 REVERSAL_PHASES = ("left", "right")
+WARMUP_STEPS = 10
+MAX_STEP_TURN_RAD = math.radians(35)
+MIN_TURN_SPEED = 0.03
+
+
+def credited_turn(phase: str, delta: float, state: MovementState) -> float:
+    """Return plausible signed progress toward the requested turn."""
+    signed = delta if phase == "left" else -delta
+    if (
+        state.still_steps > 0
+        or state.speed < MIN_TURN_SPEED
+        or abs(delta) > MAX_STEP_TURN_RAD
+    ):
+        return 0.0
+    return signed
 
 
 def _with_direction(action: StimAction, direction: str) -> StimAction:
@@ -303,29 +323,73 @@ async def teach(
     max_steps: int,
     on_step: Callable[[StepLog], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
-) -> list[StepLog]:
+    target_rad: float = TURN_TARGET_RAD,
+) -> tuple[list[StepLog], bool]:
+    """Turn 180 degrees each way, starting with the environment direction."""
     if max_steps < 0:
-        raise ValueError("max_steps must be 0 (forever) or at least 1")
+        raise ValueError("max_steps must be 0 (until success) or at least 1")
+    if target_rad <= 0:
+        raise ValueError("target_rad must be positive")
     state = await env.reset()
     logs: list[StepLog] = []
+    turns = {phase: 0.0 for phase in REVERSAL_PHASES}
+    phases = (
+        REVERSAL_PHASES if env.direction == "left" else tuple(reversed(REVERSAL_PHASES))
+    )
+    heading = state.heading_rad
     step = 0
-    while True:
-        step += 1
-        if max_steps and step > max_steps:
-            break
-        if should_stop is not None and should_stop():
-            break
-        action = policy.act(state)
-        next_state, reward, done = await env.step(action)
-        policy.update(state, action, reward, next_state)
-        log = StepLog(step, next_state, action, reward)
-        logs.append(log)
-        if on_step is not None:
-            on_step(log)
-        state = next_state
-        if done:
-            break
-    return logs
+    for phase_i, phase in enumerate(phases):
+        env.direction = phase
+        reheat = getattr(policy, "reheat", None)
+        if callable(reheat):
+            reheat(phase)
+        if phase_i:
+            env._still = 0
+        phase_step = 0
+        while turns[phase] < target_rad:
+            step += 1
+            phase_step += 1
+            if max_steps and step > max_steps:
+                return logs, False
+            if should_stop is not None and should_stop():
+                return logs, False
+            warming = phase_step <= WARMUP_STEPS
+            if warming:
+                action = _with_direction(
+                    env.bind_action(DEFAULT_FREQUENCY_HZ, DEFAULT_DURATION_MS),
+                    phase,
+                )
+            else:
+                action = _with_direction(policy.act(state), phase)
+            next_state, reward, done = await env.step(action)
+            delta = wrap_pi(next_state.heading_rad - heading)
+            heading = next_state.heading_rad
+            credited = credited_turn(phase, delta, next_state)
+            turns[phase] += credited
+            if warming:
+                reward = 0.0
+            else:
+                reward = credited + 0.3 * next_state.speed
+                if next_state.still_steps > 0:
+                    reward -= 0.6
+                policy.update(state, action, reward, next_state)
+            log = StepLog(
+                step,
+                next_state,
+                action,
+                reward,
+                turns[phase],
+                turns["left"],
+                turns["right"],
+                warming,
+            )
+            logs.append(log)
+            if on_step is not None:
+                on_step(log)
+            state = next_state
+            if done:
+                return logs, False
+    return logs, True
 
 
 async def reversal(
@@ -334,38 +398,20 @@ async def reversal(
     max_steps: int,
     on_step: Callable[[StepLog, dict[str, float]], None] | None = None,
 ) -> tuple[list[StepLog], dict[str, float], bool]:
-    """Left 180, then right 180. Success only if both sides finish."""
-    if max_steps < 1:
-        raise ValueError("max_steps must be at least 1")
-    state = await env.reset()
-    logs: list[StepLog] = []
+    """Compatibility wrapper around the shared left-then-right teach loop."""
     progress = {phase: 0.0 for phase in REVERSAL_PHASES}
-    heading = state.heading_rad
-    step = 0
-    for phase in REVERSAL_PHASES:
-        env.direction = phase
-        while progress[phase] < TURN_TARGET_RAD:
-            step += 1
-            if step > max_steps:
-                return logs, progress, False
-            action = _with_direction(policy.act(state), phase)
-            next_state, reward, done = await env.step(action)
-            delta = wrap_pi(next_state.heading_rad - heading)
-            heading = next_state.heading_rad
-            signed = delta if phase == "left" else -delta
-            progress[phase] += max(0.0, signed)
-            policy.update(state, action, reward, next_state)
-            log = StepLog(step, next_state, action, reward)
-            logs.append(log)
-            if on_step is not None:
-                on_step(log, progress)
-            state = next_state
-            if done:
-                return logs, progress, False
-    return logs, progress, True
+
+    def report(log: StepLog) -> None:
+        progress["left"] = log.left_rad
+        progress["right"] = log.right_rad
+        if on_step is not None:
+            on_step(log, progress)
+
+    logs, success = await teach(env, policy, max_steps, on_step=report)
+    return logs, progress, success
 
 
-def summarize(logs: list[StepLog]) -> str:
+def summarize(logs: list[StepLog], success: bool | None = None) -> str:
     if not logs:
         return "empty episode"
     n = len(logs)
@@ -373,18 +419,30 @@ def summarize(logs: list[StepLog]) -> str:
     speed = sum(item.state.speed for item in logs) / n
     turn = sum(abs(item.state.turn_rate_rad) for item in logs) / n
     still = sum(1 for item in logs if item.state.still_steps > 0)
-    return (
-        f"steps {n}  reward {reward:.2f}  "
+    left = math.degrees(logs[-1].left_rad)
+    right = math.degrees(logs[-1].right_rad)
+    extra = ""
+    if success is not None or logs[-1].left_rad or logs[-1].right_rad:
+        extra = f"left {left:.0f}/180  right {right:.0f}/180  "
+    body = (
+        f"steps {n}  {extra}reward {reward:.2f}  "
         f"mean speed {speed:.3f}  mean |turn| {turn:.3f}  "
         f"moving-still {still}/{n}"
     )
+    if success is None:
+        return body
+    status = "SUCCESS" if success else "FAIL"
+    return f"{status}  {body}"
 
 
 def format_teach_step(log: StepLog) -> str:
+    phase = "warm" if log.warmup else log.action.direction
     return (
-        f"step {log.step:02d}  x {log.state.x:.3f} y {log.state.y:.3f}  "
+        f"step {log.step:02d}  {phase:5s}  "
         f"spd {log.state.speed:.3f}  "
-        f"turn {log.state.turn_rate_rad:+.3f}  still {log.state.still_steps}  "
+        f"L {math.degrees(log.left_rad):5.1f}/180  "
+        f"R {math.degrees(log.right_rad):5.1f}/180  "
+        f"still {log.state.still_steps}  "
         f"-> {log.action.frequency_hz} Hz  {log.action.duration_ms} ms  "
         f"r={log.reward:+.2f}"
     )

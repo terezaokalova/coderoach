@@ -21,7 +21,7 @@ from typing import Literal, assert_never
 import cv2
 import numpy as np
 
-from .camera import Pose
+from .camera import Pose, PoseSmoother
 
 TrackerName = Literal["blob", "csrt"]
 Box = tuple[int, int, int, int]
@@ -296,11 +296,14 @@ class PhonePoseTracker:
         self,
         source: int | str = LIVE_JPEG,
         tracker: TrackerName = "blob",
+        smoothing_seconds: float = 0.12,
     ) -> None:
         self.source = source
         self.tracker_name = tracker
+        self._smoother = PoseSmoother(smoothing_seconds)
         self._guard = threading.Lock()
         self._pose: Pose | None = None
+        self._returned_t: float | None = None
         self._view: np.ndarray | None = None
         self._pending: tuple[tuple[int, int], tuple[int, int]] | None = None
         self._lock: BlobLock | CsrtLock | None = None
@@ -350,7 +353,8 @@ class PhonePoseTracker:
     async def read(self) -> Pose:
         while True:
             pose = self.latest()
-            if pose is not None:
+            if pose is not None and pose.t != self._returned_t:
+                self._returned_t = pose.t
                 return pose
             if not self._running:
                 raise RuntimeError("Camera stopped before the roach was locked.")
@@ -379,6 +383,7 @@ class PhonePoseTracker:
                 box_from_drag(*pending, (cols, rows)),
             )
             self._trail.clear()
+            self._smoother.reset()
             with self._guard:
                 self._pose = None
         view = frame.copy()
@@ -407,12 +412,14 @@ class PhonePoseTracker:
                 2,
             )
             return view
-        pose = pose_from_box(box, (cols, rows), time.monotonic() - self._t0)
+        pose = self._smoother.update(
+            pose_from_box(box, (cols, rows), time.monotonic() - self._t0)
+        )
         with self._guard:
             self._pose = pose
         self.status = "locked"
         x, y, width, height = box
-        cx, cy = x + width // 2, y + height // 2
+        cx, cy = round(pose.x * cols), round(pose.y * rows)
         self._trail.append((cx, cy))
         cv2.rectangle(view, (x, y), (x + width, y + height), (0, 220, 0), 2)
         cv2.circle(view, (cx, cy), 4, (0, 220, 0), -1)
@@ -477,6 +484,7 @@ class PhonePoseTracker:
                     return
                 if key == ord("r"):
                     self._lock = None
+                    self._smoother.reset()
                     with self._guard:
                         self._pose = None
                     self._trail.clear()

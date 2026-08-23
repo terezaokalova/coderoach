@@ -82,9 +82,12 @@ async def run_live_teach(args: argparse.Namespace) -> None:
         raise SystemExit("compare is simulation-only")
     tracker = open_camera(args)
     pose = "camera" if tracker is not None else "sim"
+    first = args.direction
+    second = "right" if first == "left" else "left"
     print(
         f"Live teach: stim on backpack, pose from {pose}. "
-        f"At most {args.max_steps} pulses, {args.cooldown:.0f} s apart."
+        f"180 {first} then 180 {second}, or {args.max_steps} pulses, "
+        f"{args.cooldown:.0f} s apart."
     )
     policy = make_teach_policy(args.policy, direction=args.direction)
     async with RoboRoach(scan_timeout=args.timeout) as roach:
@@ -95,6 +98,7 @@ async def run_live_teach(args: argparse.Namespace) -> None:
                 direction=args.direction,
                 tracker=tracker,
             )
+            env.max_still = 0
             plot = None
             if not args.no_plot:
                 plot = make_live_plot(
@@ -103,18 +107,22 @@ async def run_live_teach(args: argparse.Namespace) -> None:
                     extra=lambda: status_text(policy),
                 )
 
+            def on_step(log) -> None:
+                if plot is not None:
+                    plot.update(log)
+                print(format_teach_step(log), flush=True)
+
             async def work():
                 return await teach(
                     env,
                     policy,
                     max_steps=args.max_steps,
-                    on_step=None if plot is None else plot.update,
+                    on_step=on_step,
+                    should_stop=None if plot is None else plot.closed,
                 )
 
-            logs = await run_with_dashboard(plot, tracker, work)
-            for log in logs:
-                print(format_teach_step(log))
-            print(summarize(logs))
+            logs, success = await run_with_dashboard(plot, tracker, work)
+            print(summarize(logs, success))
             if plot is not None:
                 plot.hold()
         except RuntimeError as exc:

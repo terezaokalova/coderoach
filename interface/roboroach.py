@@ -50,6 +50,10 @@ MAX_PULSE_WIDTH_MS = 1
 MIN_DURATION_MS = 200
 MAX_DURATION_MS = 300
 MAX_GAIN_PERCENT = 10
+DEFAULT_FREQUENCY_HZ = 10
+DEFAULT_PULSE_WIDTH_MS = 1
+DEFAULT_DURATION_MS = 250
+DEFAULT_GAIN_PERCENT = 10
 _SAFETY_PATH = Path(tempfile.gettempdir()) / "roboroach-safety.json"
 
 
@@ -134,7 +138,9 @@ class RoboRoach:
         self.name = name
         self.scan_timeout = scan_timeout
         self.client: BleakClient | None = None
-        self._duration_ms = 250
+        self._duration_ms = DEFAULT_DURATION_MS
+        self._io_lock = asyncio.Lock()
+        self._configured = False
 
     async def connect(self) -> None:
         if self.device is None:
@@ -166,6 +172,7 @@ class RoboRoach:
         if self.client is not None:
             await self.client.disconnect()
             self.client = None
+            self._configured = False
 
     async def __aenter__(self) -> "RoboRoach":
         await self.connect()
@@ -188,17 +195,19 @@ class RoboRoach:
                 raise RuntimeError(f"Empty value returned by {uuid}")
             return value[0]
 
-        return StimulationSettings(
-            frequency_hz=await read_u8(FREQUENCY_UUID),
-            pulse_width_ms=await read_u8(PULSE_WIDTH_UUID),
-            duration_ms=5 * await read_u8(DURATION_UUID),
-            gain_percent=await read_u8(GAIN_UUID),
-            random_mode=bool(await read_u8(RANDOM_MODE_UUID)),
-        )
+        async with self._io_lock:
+            return StimulationSettings(
+                frequency_hz=await read_u8(FREQUENCY_UUID),
+                pulse_width_ms=await read_u8(PULSE_WIDTH_UUID),
+                duration_ms=5 * await read_u8(DURATION_UUID),
+                gain_percent=await read_u8(GAIN_UUID),
+                random_mode=bool(await read_u8(RANDOM_MODE_UUID)),
+            )
 
     async def read_battery_percent(self) -> int | None:
         try:
-            value = await self._connected_client().read_gatt_char(BATTERY_UUID)
+            async with self._io_lock:
+                value = await self._connected_client().read_gatt_char(BATTERY_UUID)
         except Exception:
             return None
         return value[0] if value else None
@@ -206,10 +215,10 @@ class RoboRoach:
     async def configure(
         self,
         *,
-        frequency_hz: int = 10,
-        pulse_width_ms: int = 1,
-        duration_ms: int = 250,
-        gain_percent: int = 10,
+        frequency_hz: int = DEFAULT_FREQUENCY_HZ,
+        pulse_width_ms: int = DEFAULT_PULSE_WIDTH_MS,
+        duration_ms: int = DEFAULT_DURATION_MS,
+        gain_percent: int = DEFAULT_GAIN_PERCENT,
         random_mode: bool = False,
     ) -> None:
         """Set values inside the living-animal waveform envelope."""
@@ -227,24 +236,29 @@ class RoboRoach:
         if not 0 <= gain_percent <= MAX_GAIN_PERCENT:
             raise ValueError(f"gain_percent must be from 0 to {MAX_GAIN_PERCENT}")
 
-        client = self._connected_client()
-        values = (
-            (FREQUENCY_UUID, frequency_hz),
-            (PULSE_WIDTH_UUID, pulse_width_ms),
-            (DURATION_UUID, duration_ms // 5),
-            (GAIN_UUID, gain_percent),
-            (RANDOM_MODE_UUID, int(random_mode)),
-        )
-        for uuid, value in values:
-            await client.write_gatt_char(uuid, bytes([value]), response=True)
-        self._duration_ms = duration_ms
+        async with self._io_lock:
+            client = self._connected_client()
+            values = (
+                (FREQUENCY_UUID, frequency_hz),
+                (PULSE_WIDTH_UUID, pulse_width_ms),
+                (DURATION_UUID, duration_ms // 5),
+                (GAIN_UUID, gain_percent),
+                (RANDOM_MODE_UUID, int(random_mode)),
+            )
+            for uuid, value in values:
+                await client.write_gatt_char(uuid, bytes([value]), response=True)
+            self._duration_ms = duration_ms
+            self._configured = True
 
     async def turn(self, direction: Literal["left", "right"]) -> None:
         """Request one firmware-timed left or right turn stimulus."""
-        guard_turn(self._duration_ms)
-        uuid = TURN_LEFT_UUID if direction == "left" else TURN_RIGHT_UUID
-        await self._connected_client().write_gatt_char(uuid, b"\x01", response=True)
-        record_turn(self._duration_ms)
+        async with self._io_lock:
+            if not self._configured:
+                raise RuntimeError("Configure safe settings before requesting a turn.")
+            guard_turn(self._duration_ms)
+            uuid = TURN_LEFT_UUID if direction == "left" else TURN_RIGHT_UUID
+            await self._connected_client().write_gatt_char(uuid, b"\x01", response=True)
+            record_turn(self._duration_ms)
 
     async def turn_left(self) -> None:
         await self.turn("left")
@@ -264,13 +278,14 @@ class RoboRoach:
 
         while True:
             await asyncio.sleep(interval_seconds)
-            client = self._connected_client()
-            frequency = await client.read_gatt_char(FREQUENCY_UUID)
-            if not frequency:
-                raise RuntimeError("Empty frequency returned during keepalive")
-            await client.write_gatt_char(
-                FREQUENCY_UUID, bytes(frequency[:1]), response=True
-            )
+            async with self._io_lock:
+                client = self._connected_client()
+                frequency = await client.read_gatt_char(FREQUENCY_UUID)
+                if not frequency:
+                    raise RuntimeError("Empty frequency returned during keepalive")
+                await client.write_gatt_char(
+                    FREQUENCY_UUID, bytes(frequency[:1]), response=True
+                )
 
 
 async def scan(timeout: float) -> None:
@@ -304,6 +319,7 @@ async def run_command(args: argparse.Namespace) -> None:
             await interactive_session(roach)
         else:
             try:
+                await roach.configure()
                 await roach.turn(args.command)
             except RuntimeError as exc:
                 raise SystemExit(str(exc))
@@ -312,6 +328,7 @@ async def run_command(args: argparse.Namespace) -> None:
 
 async def interactive_session(roach: RoboRoach) -> None:
     """Keep one connection open and accept commands from the terminal."""
+    await roach.configure()
     print(f"Connected to {roach.device.name} ({roach.device.address})")
     print("Commands: left, right, info, quit")
     keepalive_task = asyncio.create_task(roach.keep_alive())

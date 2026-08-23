@@ -3,6 +3,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import yaml
 import zarr
 from scipy.signal import butter, sosfiltfilt
@@ -135,4 +136,32 @@ for subject, rec in sessions:
     plt.show()
     plt.close()
 
+# %% pose-label confidence over time
+rec = info["default_session"]
+pose = pd.read_parquet(
+    f"{DATA}/{rec}/derived/pose.parquet",
+    storage_options={"User-Agent": "Mozilla/5.0"},
+)
+likelihood_cols = [column for column in pose if column.endswith("_likelihood")]
+labels = [column.removesuffix("_likelihood") for column in likelihood_cols]
+cameras = pose["camera"].unique()
+fig, axes = plt.subplots(
+    len(cameras), 1, figsize=(14, 4 * len(cameras)), sharex=True, squeeze=False
+)
+for ax, camera in zip(axes[:, 0], cameras):
+    rows = pose[(pose["camera"] == camera) & (pose["neural_sample"] >= 0)]
+    image = ax.imshow(
+        rows[likelihood_cols].to_numpy().T,
+        aspect="auto",
+        origin="lower",
+        extent=(rows["t_s"].iloc[0], rows["t_s"].iloc[-1], -0.5, len(labels) - 0.5),
+        vmin=0,
+        vmax=1,
+    )
+    ax.set_yticks(range(len(labels)), labels)
+    ax.set_ylabel(camera)
+axes[-1, 0].set_xlabel("time (s)")
+fig.colorbar(image, ax=axes[:, 0], label="DLC likelihood")
+fig.suptitle(f"{rec} pose labels")
+plt.show()
 # %%

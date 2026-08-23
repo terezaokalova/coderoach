@@ -8,6 +8,7 @@ interface/track.py is the live iPhone and webcam implementation.
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from dataclasses import dataclass
 from typing import Protocol
@@ -26,6 +27,33 @@ class PoseTracker(Protocol):
 
 class PoseSource(Protocol):
     def pose(self) -> Pose: ...
+
+
+class PoseSmoother:
+    """Time-based low-pass filter for noisy camera positions."""
+
+    def __init__(self, time_constant_s: float = 0.12) -> None:
+        if time_constant_s < 0:
+            raise ValueError("time_constant_s must be non-negative")
+        self.time_constant_s = time_constant_s
+        self._pose: Pose | None = None
+
+    def reset(self) -> None:
+        self._pose = None
+
+    def update(self, pose: Pose) -> Pose:
+        previous = self._pose
+        if previous is None or pose.t <= previous.t or self.time_constant_s == 0:
+            self._pose = pose
+            return pose
+
+        alpha = -math.expm1(-(pose.t - previous.t) / self.time_constant_s)
+        self._pose = Pose(
+            previous.x + alpha * (pose.x - previous.x),
+            previous.y + alpha * (pose.y - previous.y),
+            pose.t,
+        )
+        return self._pose
 
 
 class SimulatedCamera:

@@ -6,6 +6,8 @@ import argparse
 import asyncio
 import math
 
+from interface.roboroach import MIN_STIM_INTERVAL_S, RoboRoach
+
 from .env import SimWorld, StimAction, format_step
 from .policy import HeadingPolicy, PathPolicy, make_teach_policy, status_text
 from .teach import (
@@ -88,7 +90,7 @@ async def run_teach_sim(args: argparse.Namespace) -> None:
         if plot is not None:
             plot.extra = lambda current=policy: status_text(current)
             plot.reset(name)
-        logs = await teach(
+        logs, success = await teach(
             env,
             policy,
             max_steps=args.max_steps,
@@ -97,7 +99,7 @@ async def run_teach_sim(args: argparse.Namespace) -> None:
         print(f"policy {name}  state=sim  stim=silent")
         for log in logs:
             print(format_teach_step(log))
-        print(summarize(logs))
+        print(summarize(logs, success))
         print()
     if plot is not None:
         plot.hold()
@@ -155,9 +157,10 @@ async def run_camera_teach(args: argparse.Namespace) -> None:
             tracker,
             extra=lambda: status_text(policy),
         )
+    second = "right" if args.direction == "left" else "left"
     print(
         "Camera teach: pose from iPhone, no backpack pulse. "
-        "Runs until you press Ctrl+C or close the window."
+        f"180 {args.direction}, then 180 {second}, or {args.max_steps} observations."
     )
 
     def on_step(log) -> None:
@@ -169,14 +172,14 @@ async def run_camera_teach(args: argparse.Namespace) -> None:
         return await teach(
             env,
             policy,
-            max_steps=0,
+            max_steps=args.max_steps,
             on_step=on_step,
             should_stop=None if plot is None else plot.closed,
         )
 
     try:
-        logs = await run_with_dashboard(plot, tracker, work)
-        print(summarize(logs))
+        logs, success = await run_with_dashboard(plot, tracker, work)
+        print(summarize(logs, success))
     except RuntimeError as exc:
         print(exc)
     except KeyboardInterrupt:
@@ -204,6 +207,24 @@ async def run_path_sim(args: argparse.Namespace) -> None:
     print(summarize_path(logs, success))
 
 
+async def run_spam(args: argparse.Namespace) -> None:
+    total = 2 * args.pulses
+    sent = 0
+    print(
+        f"Open-loop turn: {args.pulses} left pulses, then "
+        f"{args.pulses} right pulses, {args.cooldown:g} s apart."
+    )
+    async with RoboRoach(scan_timeout=args.timeout) as roach:
+        await roach.configure()
+        for direction in ("left", "right"):
+            for pulse in range(1, args.pulses + 1):
+                await roach.turn(direction)
+                sent += 1
+                print(f"{direction} {pulse}/{args.pulses}", flush=True)
+                if sent < total:
+                    await asyncio.sleep(args.cooldown)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -215,7 +236,7 @@ def main() -> None:
     teach_p.add_argument(
         "--policy",
         choices=("static", "irregular", "bandit"),
-        default="irregular",
+        default="bandit",
     )
     teach_p.add_argument(
         "--compare",
@@ -223,7 +244,12 @@ def main() -> None:
         help="run static then irregular in simulation",
     )
     teach_p.add_argument("--direction", choices=("left", "right"), default="left")
-    teach_p.add_argument("--max-steps", type=int, default=16)
+    teach_p.add_argument(
+        "--max-steps",
+        type=int,
+        default=150,
+        help="stop after this many pulses or after completing both turns",
+    )
     teach_p.add_argument("--live", action="store_true")
     teach_p.add_argument("--no-plot", action="store_true")
     teach_p.add_argument("--cooldown", type=float, default=2.0)
@@ -245,6 +271,14 @@ def main() -> None:
     rev_p.add_argument("--cooldown", type=float, default=2.0)
     rev_p.add_argument("--timeout", type=float, default=10.0)
     add_camera_args(rev_p)
+
+    spam_p = sub.add_parser(
+        "spam",
+        help="send a bounded left sequence followed by a right sequence",
+    )
+    spam_p.add_argument("--pulses", type=int, default=6)
+    spam_p.add_argument("--cooldown", type=float, default=MIN_STIM_INTERVAL_S)
+    spam_p.add_argument("--timeout", type=float, default=10.0)
 
     goal_p = sub.add_parser("goal", help="heading correction toward a point")
     goal_p.add_argument("--live", action="store_true")
@@ -278,11 +312,22 @@ def main() -> None:
     path_p.add_argument("--arrive", type=float, default=0.12)
 
     args = parser.parse_args()
+    if getattr(args, "max_steps", 1) < 1:
+        raise SystemExit("max-steps must be at least 1")
+    if getattr(args, "pulses", 1) < 1:
+        raise SystemExit("pulses must be at least 1")
+    if args.command == "spam" and args.cooldown < MIN_STIM_INTERVAL_S:
+        raise SystemExit(f"cooldown must be at least {MIN_STIM_INTERVAL_S:g} seconds")
+    if getattr(args, "live", False) and args.cooldown < MIN_STIM_INTERVAL_S:
+        raise SystemExit(
+            f"cooldown must be at least {MIN_STIM_INTERVAL_S:g} seconds for live stim"
+        )
+    if args.command == "spam":
+        asyncio.run(run_spam(args))
+        return
     if args.command == "teach" and args.camera:
         asyncio.run(run_camera_teach(args))
         return
-    if args.max_steps < 1:
-        raise SystemExit("max-steps must be at least 1")
     if args.command == "teach":
         if args.live:
             from .live import run_live_teach

@@ -64,13 +64,13 @@ final class App: NSObject, NSApplicationDelegate, AVCaptureVideoDataOutputSample
         requestCamera()
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     private func requestCamera() {
         AVCaptureDevice.requestAccess(for: .video) { granted in
             DispatchQueue.main.async {
                 if granted {
-                    self.startSession()
+                    self.tryStart()
                 } else {
                     self.window.title = "Camera denied — allow RoachCam in Privacy settings"
                 }
@@ -89,12 +89,18 @@ final class App: NSObject, NSApplicationDelegate, AVCaptureVideoDataOutputSample
         return session.devices
     }
 
-    private func startSession() {
+    private func tryStart() {
+        if session.isRunning { return }
         let found = devices()
         FileHandle.standardError.write(Data("devices: \(found.map(\.localizedName))\n".utf8))
-        let device = found.first { $0.localizedName.localizedCaseInsensitiveContains("iphone") } ?? found.last
+        let device = found.first { $0.localizedName.localizedCaseInsensitiveContains("iphone") }
+        window.contentView?.wantsLayer = true
+        window.makeKeyAndOrderFront(nil)
         guard let device else {
-            window.title = "No camera found"
+            window.title = "No iPhone camera — unlock the phone and keep it near the Mac"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                self?.tryStart()
+            }
             return
         }
         do {
@@ -106,6 +112,10 @@ final class App: NSObject, NSApplicationDelegate, AVCaptureVideoDataOutputSample
             output.setSampleBufferDelegate(self, queue: videoQueue)
             if session.canAddOutput(output) { session.addOutput(output) }
             session.commitConfiguration()
+            preview.session = session
+            preview.videoGravity = .resizeAspect
+            preview.frame = window.contentView?.bounds ?? .zero
+            window.contentView?.layer?.addSublayer(preview)
             session.startRunning()
             window.title = "iPhone livestream — \(device.localizedName)"
             FileHandle.standardError.write(Data("using \(device.localizedName)\n".utf8))
@@ -141,7 +151,7 @@ mkdirp()
 let app = NSApplication.shared
 let delegate = App()
 app.delegate = delegate
-app.setActivationPolicy(.accessory)
+app.setActivationPolicy(.regular)
 app.run()
 
 func mkdirp() {

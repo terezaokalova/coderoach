@@ -11,7 +11,7 @@ samples = deque(maxlen=500)
 
 plt.ion()
 fig, ax = plt.subplots()
-line, = ax.plot([])
+(line,) = ax.plot([])
 ax.set_title("GSR signal")
 ax.set_xlabel("Sample")
 ax.set_ylabel("ADC reading")

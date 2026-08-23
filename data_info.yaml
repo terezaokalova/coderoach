@@ -1,9 +1,9 @@
-base_url: https://pub-8b7715bb28444713b1c917d7c4661390.r2.dev/recordings
+base_url: https://data.axoneuro.dev/recordings
 dashboard: https://axoneuro.dev/dashboard
 default_session: SD11_rec_20260820_182553.zarr
 note: >
-  Public zarrs are raw broadband only. derived/spikes.npz, pose, and LFP 404 on
-  every store we opened. Close pairs keep the later take.
+  SD11 recordings include derived/pose.parquet. SD10 pose is not available yet.
+  Close pairs keep the later take.
 
 subjects:
   SD10:
@@ -25,9 +25,9 @@ subjects:
     good_ch: 26/32
     why: 4-channel AIO
     sessions:
-      - {date: 2026-08-20, time: "18:25", use: true, id: SD11_rec_20260820_182553.zarr, derived: false}
-      - {date: 2026-08-20, time: "18:23", use: false, id: SD11_rec_20260820_182314.zarr, note: restart, derived: false}
-      - {date: 2026-08-17, time: "15:35", use: false, id: SD11_rec_20260817_153507.zarr, note: grounding fell off, derived: false}
+      - {date: 2026-08-20, time: "18:25", use: true, id: SD11_rec_20260820_182553.zarr, derived: true, pose: true}
+      - {date: 2026-08-20, time: "18:23", use: false, id: SD11_rec_20260820_182314.zarr, note: restart, derived: true, pose: true}
+      - {date: 2026-08-17, time: "15:35", use: false, id: SD11_rec_20260817_153507.zarr, note: grounding fell off, derived: true, pose: true}
 
   RNU006:
     device: V1.6

@@ -1,0 +1,32 @@
+name: axohack-ml
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      # Cluster (linux-64 / x86_64): prefer these pins
+      - torch>=2.4,<3
+      - numpy>=2
+      - pandas
+      - pyarrow
+      - zarr>=3
+      - numcodecs
+      - fsspec
+      - aiohttp
+      - matplotlib
+      - scipy
+      - pyyaml
+      - pytest
+      - requests
+      - ipykernel
+      - black
+      - ruff
+# Cluster (recommended):
+#   conda env create -f environment-ml.yml
+#
+# Local macOS x86_64 / Rosetta (older torch wheels):
+#   CONDA_SUBDIR=osx-64 conda create -n axohack-ml python=3.12 pip -c conda-forge -y
+#   conda activate axohack-ml
+#   pip install "torch==2.2.2" "numpy<2" "zarr>=3,<3.1" "scipy<1.15" \
+#     pandas pyarrow numcodecs fsspec aiohttp matplotlib pyyaml pytest requests ipykernel

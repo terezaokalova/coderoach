@@ -477,10 +477,12 @@ async def main_async(args: argparse.Namespace) -> int:
 
                 def windows() -> Sequence[tuple[float, float]]:
                     return []
+
             elif observed:
 
                 def windows() -> Sequence[tuple[float, float]]:
                     return watch.windows
+
             else:
 
                 def windows() -> Sequence[tuple[float, float]]:
@@ -535,9 +537,9 @@ async def main_async(args: argparse.Namespace) -> int:
             {
                 "tau": summary,
                 "keepalive_mode": keepalive_mode,
-                "keepalive_interval_s": None
-                if args.no_keepalive
-                else args.keepalive_interval,
+                "keepalive_interval_s": (
+                    None if args.no_keepalive else args.keepalive_interval
+                ),
                 "keepalive_ticks": len(ticks),
                 "reps_affected_by_keepalive": sum(
                     rep.keepalive_affected for rep in reps

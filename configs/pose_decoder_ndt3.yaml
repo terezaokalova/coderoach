@@ -1,0 +1,56 @@
+data:
+  info_yaml: data_info.yaml
+  sessions:
+    - SD11_rec_20260817_153507.zarr
+    - SD11_rec_20260820_182314.zarr
+    - SD11_rec_20260820_182553.zarr  # final: held out for test
+  camera: cam0
+  frame_width: 1280
+  frame_height: 1024
+  likelihood_threshold: 0.3
+  bin_ms: 20.0
+  window_s: 2.0
+  cache_dir: .cache/pose_decoder
+
+split:
+  protocol: session  # temporal | session
+  # Within train_sessions: chronological train/val. Test is a whole recording.
+  train_frac: 0.85
+  val_frac: 0.15
+  test_frac: 0.0
+  guard_s: 2.0
+  train_sessions:
+    - SD11_rec_20260817_153507.zarr
+    - SD11_rec_20260820_182314.zarr
+  val_sessions: []  # unused; val is a later time block inside train_sessions
+  test_sessions:
+    - SD11_rec_20260820_182553.zarr
+
+model:
+  backbone: ndt3
+  in_channels: 32
+  hidden_channels: 64
+  kernel_size: 10
+  stride: 1
+  n_keypoints: 15
+  coords: 2
+  # 45M NDT3: 6 layers, 8 heads, hidden 1024. 350M uses 12 / 16 / 2048.
+  n_layers: 6
+  n_heads: 8
+  hidden_size: 1024
+  feedforward_factor: 1
+  ndt3_repo: joel99/ndt3
+  ndt3_file: 753jmg4u/checkpoints/val-epoch=397-val_loss=0.4987.ckpt
+  freeze_backbone: false
+
+train:
+  seed: 0
+  batch_size: 8
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  max_epochs: 20
+  early_stop_patience: 5
+  num_workers: 0
+  device: auto  # auto | cpu | cuda | mps
+  checkpoint_dir: checkpoints/pose_decoder_ndt3
+  time_shift_bins: 25  # ~0.5 s control at 20 ms bins
