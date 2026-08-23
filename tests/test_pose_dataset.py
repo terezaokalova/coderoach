@@ -17,6 +17,7 @@ from models.pose_dataset import (
     session_ranges,
     temporal_ranges,
     window_starts_in_range,
+    xy_to_class,
 )
 from models.pose_decoder import PoseDecoder, masked_smooth_l1
 from models.preprocess import cache_path
@@ -67,6 +68,9 @@ def test_load_pose_decoder_config(tmp_path: Path):
     assert cfg.split.test_frac == 0.0
     assert cfg.split.test_sessions == ("SD11_rec_20260820_182553.zarr",)
     assert cfg.model.backbone == "cnn"
+    assert cfg.model.head == "class"
+    assert cfg.model.grid_x == 4
+    assert cfg.model.grid_y == 4
 
 
 def test_load_ndt3_config():
@@ -77,6 +81,7 @@ def test_load_ndt3_config():
     assert cfg.model.hidden_size == 1024
     assert cfg.model.ndt3_repo == "joel99/ndt3"
     assert "753jmg4u" in cfg.model.ndt3_file
+    assert cfg.model.head == "class"
 
 
 def test_config_rejects_unknown_key(tmp_path: Path):
@@ -289,6 +294,31 @@ def test_dataset_returns_aligned_tensors():
     batch = collate_pose_batch([ds[0], ds[1]])
     assert batch["neural"].shape[0] == 2
     assert batch["pose_valid"].dtype == torch.bool
+    assert 0 <= int(item["pose_class"]) < 16
+    assert batch["pose_class"].shape == (2,)
+
+
+def test_xy_to_class_uses_last_valid_cell():
+    xy = np.array([[[0.1, 0.1], [0.1, 0.1]], [[0.9, 0.1], [0.9, 0.1]]], dtype=np.float32)
+    mask = np.ones((2, 2), dtype=bool)
+    assert xy_to_class(xy, mask, 4, 4) == 3
+    mask[1] = False
+    assert xy_to_class(xy, mask, 4, 4) == 0
+
+
+def test_class_head_logits():
+    model = PoseDecoder(
+        in_channels=32,
+        hidden_channels=8,
+        kernel_size=3,
+        stride=1,
+        n_layers=1,
+        n_classes=16,
+    )
+    logits = model(torch.randn(3, 20, 32))
+    assert logits.shape == (3, 16)
+    loss = torch.nn.functional.cross_entropy(logits, torch.tensor([0, 7, 15]))
+    loss.backward()
 
 
 def test_spike_cache_roundtrip(tmp_path: Path):

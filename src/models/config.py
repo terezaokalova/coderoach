@@ -56,6 +56,9 @@ class ModelConfig:
     feedforward_factor: int
     dilations: tuple[int, ...]
     dropout: float
+    head: str
+    grid_x: int
+    grid_y: int
 
 
 @dataclass(frozen=True)
@@ -121,9 +124,13 @@ _MODEL_OPTIONAL = {
     "feedforward_factor",
     "dilations",
     "dropout",
+    "head",
+    "grid_x",
+    "grid_y",
 }
 _TRAIN_OPTIONAL = {"adv_weight"}
 _BACKBONES = {"cnn", "ndt3"}
+_HEADS = {"pose", "class"}
 _TRAIN_KEYS = {
     "seed",
     "batch_size",
@@ -190,6 +197,13 @@ def load_pose_decoder_config(path: str | Path) -> PoseDecoderConfig:
     backbone = str(model_raw.get("backbone", "cnn"))
     if backbone not in _BACKBONES:
         raise ValueError(f"model.backbone must be cnn or ndt3, got {backbone!r}")
+    head = str(model_raw.get("head", "pose"))
+    if head not in _HEADS:
+        raise ValueError(f"model.head must be pose or class, got {head!r}")
+    grid_x = int(model_raw.get("grid_x", 4))
+    grid_y = int(model_raw.get("grid_y", 4))
+    if grid_x < 1 or grid_y < 1:
+        raise ValueError(f"model.grid_x/grid_y must be >= 1, got {grid_x}x{grid_y}")
     stride = int(model_raw["stride"])
     if stride < 1:
         raise ValueError(f"model.stride must be >= 1, got {stride}")
@@ -280,6 +294,9 @@ def load_pose_decoder_config(path: str | Path) -> PoseDecoderConfig:
             feedforward_factor=int(model_raw.get("feedforward_factor", 1)),
             dilations=dilations,
             dropout=dropout,
+            head=head,
+            grid_x=grid_x,
+            grid_y=grid_y,
         ),
         train=TrainConfig(
             seed=int(train_raw["seed"]),

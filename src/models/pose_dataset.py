@@ -175,6 +175,27 @@ def session_ranges(
     return ranges
 
 
+def xy_to_class(
+    pose_xy: np.ndarray,
+    pose_mask: np.ndarray,
+    grid_x: int,
+    grid_y: int,
+) -> int:
+    """Map the last valid pose in a window to one arena-grid class."""
+    if pose_xy.size == 0:
+        return 0
+    for i in range(pose_xy.shape[0] - 1, -1, -1):
+        weights = pose_mask[i].astype(np.float32)
+        total = float(weights.sum())
+        if total <= 0:
+            continue
+        xy = (pose_xy[i] * weights[:, None]).sum(axis=0) / total
+        gx = int(np.clip(np.floor(xy[0] * grid_x), 0, grid_x - 1))
+        gy = int(np.clip(np.floor(xy[1] * grid_y), 0, grid_y - 1))
+        return int(gy * grid_x + gx)
+    return 0
+
+
 def window_starts_in_range(
     *,
     n_bins: int,
@@ -209,11 +230,15 @@ class PoseSequenceDataset(Dataset):
         neural_std: np.ndarray | None = None,
         time_shift_bins: int = 0,
         normalize_neural: bool = True,
+        grid_x: int = 4,
+        grid_y: int = 4,
     ) -> None:
         self.window_bins = int(round(window_s / (bin_ms / 1000.0)))
         self.bin_ms = bin_ms
         self.split_name = split_name
         self.time_shift_bins = int(time_shift_bins)
+        self.grid_x = int(grid_x)
+        self.grid_y = int(grid_y)
         self.items: list[tuple[int, int]] = []
         self.sessions = sessions
         for si, sess in enumerate(sessions):
@@ -289,6 +314,9 @@ class PoseSequenceDataset(Dataset):
             "neural_sample": torch.from_numpy(pose_ns),
             "session": sess.session,
             "window_start_bin": start,
+            "pose_class": xy_to_class(
+                pose_xy, pose_mask, self.grid_x, self.grid_y
+            ),
         }
 
 
@@ -324,6 +352,9 @@ def collate_pose_batch(batch: list[dict]) -> dict[str, torch.Tensor | list]:
         "window_start_bin": torch.tensor(
             [item["window_start_bin"] for item in batch], dtype=torch.int64
         ),
+        "pose_class": torch.tensor(
+            [item["pose_class"] for item in batch], dtype=torch.int64
+        ),
     }
 
 
@@ -336,6 +367,8 @@ def build_split_datasets(
     protocol = protocol or cfg.split.protocol
     if normalize_neural is None:
         normalize_neural = cfg.model.backbone != "ndt3"
+    grid_x = cfg.model.grid_x
+    grid_y = cfg.model.grid_y
     split_cfg = SplitConfig(
         protocol=protocol,
         train_frac=cfg.split.train_frac,
@@ -361,6 +394,8 @@ def build_split_datasets(
             split_name="train",
             split_cfg=split_cfg,
             normalize_neural=normalize_neural,
+            grid_x=grid_x,
+            grid_y=grid_y,
         )
         val = PoseSequenceDataset(
             arrays,
@@ -370,6 +405,8 @@ def build_split_datasets(
             split_cfg=split_cfg,
             neural_mean=train.neural_mean,
             neural_std=train.neural_std,
+            grid_x=grid_x,
+            grid_y=grid_y,
         )
         test = PoseSequenceDataset(
             arrays,
@@ -379,6 +416,8 @@ def build_split_datasets(
             split_cfg=split_cfg,
             neural_mean=train.neural_mean,
             neural_std=train.neural_std,
+            grid_x=grid_x,
+            grid_y=grid_y,
         )
         return {"train": train, "val": val, "test": test}
 
@@ -413,6 +452,8 @@ def build_split_datasets(
         split_name="train",
         split_cfg=split_cfg,
         normalize_neural=normalize_neural,
+        grid_x=grid_x,
+        grid_y=grid_y,
     )
     val = PoseSequenceDataset(
         train_arrays,
@@ -422,6 +463,8 @@ def build_split_datasets(
         split_cfg=split_cfg,
         neural_mean=train.neural_mean,
         neural_std=train.neural_std,
+        grid_x=grid_x,
+        grid_y=grid_y,
     )
     test = PoseSequenceDataset(
         test_arrays,
@@ -431,5 +474,7 @@ def build_split_datasets(
         split_cfg=split_cfg,
         neural_mean=train.neural_mean,
         neural_std=train.neural_std,
+        grid_x=grid_x,
+        grid_y=grid_y,
     )
     return {"train": train, "val": val, "test": test}

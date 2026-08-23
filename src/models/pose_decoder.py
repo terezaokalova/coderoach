@@ -37,6 +37,7 @@ class PoseDecoder(nn.Module):
         dilations: tuple[int, ...] | None = None,
         dropout: float = 0.0,
         n_sessions: int = 0,
+        n_classes: int = 0,
     ) -> None:
         super().__init__()
         if stride < 1:
@@ -69,7 +70,9 @@ class PoseDecoder(nn.Module):
                 layers.append(nn.Dropout(dropout))
             ch_in = hidden_channels
         self.encoder = nn.Sequential(*layers)
-        self.head = nn.Linear(hidden_channels, n_keypoints * coords)
+        self.n_classes = int(n_classes)
+        out = n_classes if self.n_classes else n_keypoints * coords
+        self.head = nn.Linear(hidden_channels, out)
         self.adv_head = None
         if n_sessions >= 2:
             adv: list[nn.Module] = [
@@ -103,11 +106,15 @@ class PoseDecoder(nn.Module):
     def forward(
         self,
         neural: torch.Tensor,
-        pose_bin_idx: torch.Tensor,
+        pose_bin_idx: torch.Tensor | None = None,
         pose_valid: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Return mean plus residual pose [B, P, K, 2] at pose_bin_idx."""
+        """Class logits [B, C] or mean plus residual pose [B, P, K, 2]."""
         encoded = self.encode(neural)  # [B, T', H]
+        if self.n_classes:
+            return self.head(encoded.mean(dim=1))
+        if pose_bin_idx is None:
+            raise ValueError("pose_bin_idx is required for the pose head")
         b, p = pose_bin_idx.shape
         t = encoded.shape[1]
         # map original 20 ms bin indices onto the strided encoder timeline

@@ -33,6 +33,9 @@ model:
   stride: 1
   n_keypoints: 15
   coords: 2
+  head: class  # pose | class; class is one arena-grid label per 2s window
+  grid_x: 4
+  grid_y: 4
   # 45M NDT3: 6 layers, 8 heads, hidden 1024. 350M uses 12 / 16 / 2048.
   n_layers: 6
   n_heads: 8

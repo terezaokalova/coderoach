@@ -18,6 +18,7 @@ from models.pose_dataset import (
     PoseSequenceDataset,
     build_split_datasets,
     collate_pose_batch,
+    xy_to_class,
 )
 from models.ndt3 import build_pose_model
 from models.pose_decoder import (
@@ -60,6 +61,48 @@ def _cat_variable_pose(chunks: list[torch.Tensor]) -> torch.Tensor:
         out[:, : t.shape[1]] = t
         padded.append(out)
     return torch.cat(padded, dim=0)
+
+
+@torch.no_grad()
+def evaluate_class(model: PoseDecoder, loader: DataLoader, device: torch.device) -> dict:
+    model.eval()
+    losses = []
+    correct = 0
+    total = 0
+    for batch in loader:
+        logits = model(batch["neural"].to(device))
+        target = batch["pose_class"].to(device)
+        losses.append(float(torch.nn.functional.cross_entropy(logits, target).item()))
+        correct += int((logits.argmax(dim=-1) == target).sum().item())
+        total += int(target.numel())
+    acc = correct / total if total else float("nan")
+    return {"loss": float(np.mean(losses)) if losses else float("nan"), "acc": acc}
+
+
+def majority_class_baseline(train_ds: PoseSequenceDataset, loader: DataLoader) -> dict:
+    labels = []
+    for si, start in train_ds.items:
+        sess = train_ds.sessions[si]
+        end = start + train_ds.window_bins
+        sel = (sess.pose_bin_idx >= start) & (sess.pose_bin_idx < end)
+        labels.append(
+            xy_to_class(
+                sess.pose_xy[sel],
+                sess.pose_mask[sel],
+                train_ds.grid_x,
+                train_ds.grid_y,
+            )
+        )
+    if not labels:
+        return {"acc": float("nan")}
+    mode = int(np.bincount(np.asarray(labels)).argmax())
+    total = 0
+    correct = 0
+    for batch in loader:
+        target = batch["pose_class"]
+        correct += int((target == mode).sum().item())
+        total += int(target.numel())
+    return {"acc": correct / total if total else float("nan"), "majority_class": mode}
 
 
 @torch.no_grad()
@@ -198,15 +241,21 @@ def train_one_epoch(
     model.train()
     losses = []
     session_fn = getattr(model, "session_logits", None)
+    n_classes = getattr(model, "n_classes", 0)
     for batch in loader:
         neural = batch["neural"].to(device)
-        pose = batch["pose"].to(device)
-        pose_mask = batch["pose_mask"].to(device)
-        pose_valid = batch["pose_valid"].to(device)
-        pose_bin_idx = batch["pose_bin_idx"].to(device)
         optimizer.zero_grad(set_to_none=True)
-        pred = model(neural, pose_bin_idx, pose_valid)
-        pose_loss = masked_smooth_l1(pred, pose, pose_mask, pose_valid)
+        if n_classes:
+            pose_loss = torch.nn.functional.cross_entropy(
+                model(neural), batch["pose_class"].to(device)
+            )
+        else:
+            pose = batch["pose"].to(device)
+            pose_mask = batch["pose_mask"].to(device)
+            pose_valid = batch["pose_valid"].to(device)
+            pose_bin_idx = batch["pose_bin_idx"].to(device)
+            pred = model(neural, pose_bin_idx, pose_valid)
+            pose_loss = masked_smooth_l1(pred, pose, pose_mask, pose_valid)
         loss = pose_loss
         if adv_weight > 0 and session_to_id is not None and session_fn is not None:
             logits = session_fn(neural, adv_lambda)
@@ -302,7 +351,9 @@ def main(argv: list[str] | None = None) -> None:
     session_names = tuple(dict.fromkeys(s.session for s in train_ds.sessions))
     session_to_id = {name: i for i, name in enumerate(session_names)}
     model = build_pose_model(cfg.model, n_sessions=len(session_to_id)).to(device)
-    model.pose_mean.copy_(torch.from_numpy(train_mean_pose(train_ds)).to(device))
+    is_class = cfg.model.head == "class"
+    if not is_class:
+        model.pose_mean.copy_(torch.from_numpy(train_mean_pose(train_ds)).to(device))
     params = [p for p in model.parameters() if p.requires_grad]
     if not params:
         raise SystemExit("no trainable parameters")
@@ -324,19 +375,12 @@ def main(argv: list[str] | None = None) -> None:
     history = []
     for epoch in range(1, max_epochs + 1):
         if args.smoke:
-            # one optimizer step path via truncated loader
-            batch = next(iter(train_loader))
-            neural = batch["neural"].to(device)
-            pose = batch["pose"].to(device)
-            pose_mask = batch["pose_mask"].to(device)
-            pose_valid = batch["pose_valid"].to(device)
-            pose_bin_idx = batch["pose_bin_idx"].to(device)
-            optimizer.zero_grad(set_to_none=True)
-            pred = model(neural, pose_bin_idx, pose_valid)
-            loss = masked_smooth_l1(pred, pose, pose_mask, pose_valid)
-            loss.backward()
-            optimizer.step()
-            train_loss = float(loss.item())
+            train_loss = train_one_epoch(
+                model,
+                [next(iter(train_loader))],
+                optimizer,
+                device,
+            )
         else:
             train_loss = train_one_epoch(
                 model,
@@ -347,22 +391,32 @@ def main(argv: list[str] | None = None) -> None:
                 adv_weight=cfg.train.adv_weight,
                 adv_lambda=_adv_lambda(epoch, max_epochs),
             )
-        val_metrics = evaluate(
-            model,
-            val_loader,
-            device,
-            frame_width=cfg.data.frame_width,
-            frame_height=cfg.data.frame_height,
-        )
+        if is_class:
+            val_metrics = evaluate_class(model, val_loader, device)
+            val_score = -val_metrics["acc"]
+            print(
+                f"epoch {epoch} train_loss={train_loss:.4f} "
+                f"val_acc={val_metrics['acc']:.3f} "
+                f"val_loss={val_metrics['loss']:.4f}"
+            )
+        else:
+            val_metrics = evaluate(
+                model,
+                val_loader,
+                device,
+                frame_width=cfg.data.frame_width,
+                frame_height=cfg.data.frame_height,
+            )
+            val_score = val_metrics["rmse_px"]
+            print(
+                f"epoch {epoch} train_loss={train_loss:.4f} "
+                f"val_rmse_px={val_metrics['rmse_px']:.2f} "
+                f"val_corr={val_metrics['corr']:.3f}"
+            )
         row = {"epoch": epoch, "train_loss": train_loss, **val_metrics}
         history.append(row)
-        print(
-            f"epoch {epoch} train_loss={train_loss:.4f} "
-            f"val_rmse_px={val_metrics['rmse_px']:.2f} "
-            f"val_corr={val_metrics['corr']:.3f}"
-        )
-        if val_metrics["rmse_px"] < best_val:
-            best_val = val_metrics["rmse_px"]
+        if val_score < best_val:
+            best_val = val_score
             patience = 0
             torch.save(
                 {
@@ -386,19 +440,6 @@ def main(argv: list[str] | None = None) -> None:
 
     ckpt = torch.load(best_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model"])
-    test_metrics = evaluate(
-        model,
-        test_loader,
-        device,
-        frame_width=cfg.data.frame_width,
-        frame_height=cfg.data.frame_height,
-    )
-    baseline = mean_pose_baseline(
-        train_ds,
-        test_loader,
-        frame_width=cfg.data.frame_width,
-        frame_height=cfg.data.frame_height,
-    )
     split_cfg = SplitConfig(
         protocol=protocol,
         train_frac=cfg.split.train_frac,
@@ -418,6 +459,8 @@ def main(argv: list[str] | None = None) -> None:
         neural_mean=train_ds.neural_mean,
         neural_std=train_ds.neural_std,
         time_shift_bins=cfg.train.time_shift_bins,
+        grid_x=cfg.model.grid_x,
+        grid_y=cfg.model.grid_y,
     )
     shift_loader = DataLoader(
         shifted,
@@ -426,13 +469,33 @@ def main(argv: list[str] | None = None) -> None:
         num_workers=cfg.train.num_workers,
         collate_fn=collate_pose_batch,
     )
-    shift_metrics = evaluate(
-        model,
-        shift_loader,
-        device,
-        frame_width=cfg.data.frame_width,
-        frame_height=cfg.data.frame_height,
-    )
+    if is_class:
+        test_metrics = evaluate_class(model, test_loader, device)
+        baseline = majority_class_baseline(train_ds, test_loader)
+        shift_metrics = evaluate_class(model, shift_loader, device)
+        n_classes = cfg.model.grid_x * cfg.model.grid_y
+        test_metrics["chance"] = 1.0 / n_classes
+    else:
+        test_metrics = evaluate(
+            model,
+            test_loader,
+            device,
+            frame_width=cfg.data.frame_width,
+            frame_height=cfg.data.frame_height,
+        )
+        baseline = mean_pose_baseline(
+            train_ds,
+            test_loader,
+            frame_width=cfg.data.frame_width,
+            frame_height=cfg.data.frame_height,
+        )
+        shift_metrics = evaluate(
+            model,
+            shift_loader,
+            device,
+            frame_width=cfg.data.frame_width,
+            frame_height=cfg.data.frame_height,
+        )
     summary = {
         "protocol": protocol,
         "train_sessions": (
@@ -468,11 +531,13 @@ def main(argv: list[str] | None = None) -> None:
         ),
         "val_is_temporal_holdout": protocol == "session",
         "test_is_second_half": protocol == "session",
+        "head": cfg.model.head,
+        "n_classes": cfg.model.grid_x * cfg.model.grid_y if is_class else 0,
         "n_train": len(train_ds),
         "n_val": len(val_ds),
         "n_test": len(test_ds),
         "test": test_metrics,
-        "mean_pose_baseline": baseline,
+        "baseline": baseline,
         "time_shifted_control": shift_metrics,
         "checkpoint": str(best_path),
         "history": history,
@@ -481,16 +546,25 @@ def main(argv: list[str] | None = None) -> None:
     out_path.write_text(json.dumps(summary, indent=2))
     print("\n=== held-out test (second half) ===")
     print(f"test_sessions: {summary['test_sessions']}")
-    print(
-        f"rmse_px={test_metrics['rmse_px']:.2f}  "
-        f"rmse_norm={test_metrics['rmse_norm']:.4f}  "
-        f"corr={test_metrics['corr']:.3f}  "
-        f"loss={test_metrics['loss']:.4f}"
-    )
-    print(
-        f"mean_pose_baseline rmse_px={baseline['rmse_px']:.2f}  "
-        f"time_shift_control rmse_px={shift_metrics['rmse_px']:.2f}"
-    )
+    if is_class:
+        print(
+            f"acc={test_metrics['acc']:.3f}  "
+            f"chance={test_metrics['chance']:.3f}  "
+            f"majority={baseline['acc']:.3f}  "
+            f"time_shift_acc={shift_metrics['acc']:.3f}  "
+            f"loss={test_metrics['loss']:.4f}"
+        )
+    else:
+        print(
+            f"rmse_px={test_metrics['rmse_px']:.2f}  "
+            f"rmse_norm={test_metrics['rmse_norm']:.4f}  "
+            f"corr={test_metrics['corr']:.3f}  "
+            f"loss={test_metrics['loss']:.4f}"
+        )
+        print(
+            f"mean_pose_baseline rmse_px={baseline['rmse_px']:.2f}  "
+            f"time_shift_control rmse_px={shift_metrics['rmse_px']:.2f}"
+        )
     print(f"wrote {out_path}")
     print(json.dumps({k: summary[k] for k in summary if k != "history"}, indent=2))
 

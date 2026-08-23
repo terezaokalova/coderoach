@@ -70,6 +70,7 @@ class NDT3PoseDecoder(nn.Module):
         max_count: int = 21,
         freeze_backbone: bool = False,
         feedforward_factor: int = 1,
+        n_classes: int = 0,
     ) -> None:
         super().__init__()
         if hidden_size % in_channels != 0:
@@ -88,7 +89,9 @@ class NDT3PoseDecoder(nn.Module):
         self.layers = nn.ModuleList(
             [_Block(hidden_size, n_heads, ff) for _ in range(n_layers)]
         )
-        self.head = nn.Linear(hidden_size, n_keypoints * coords)
+        self.n_classes = int(n_classes)
+        out = self.n_classes if self.n_classes else n_keypoints * coords
+        self.head = nn.Linear(hidden_size, out)
         self.register_buffer("pose_mean", torch.zeros(n_keypoints, coords))
         if freeze_backbone:
             for param in (*self.spike_embed.parameters(), *self.layers.parameters()):
@@ -113,10 +116,14 @@ class NDT3PoseDecoder(nn.Module):
     def forward(
         self,
         neural: torch.Tensor,
-        pose_bin_idx: torch.Tensor,
+        pose_bin_idx: torch.Tensor | None = None,
         pose_valid: torch.Tensor | None = None,
     ) -> torch.Tensor:
         encoded = self.encode(neural)
+        if self.n_classes:
+            return self.head(encoded.mean(dim=1))
+        if pose_bin_idx is None:
+            raise ValueError("pose_bin_idx is required for the pose head")
         b, p = pose_bin_idx.shape
         t = encoded.shape[1]
         idx = pose_bin_idx.clamp(0, t - 1)
@@ -237,6 +244,7 @@ def load_ndt3_weights(model: NDT3PoseDecoder, ckpt_path: Path) -> dict[str, int]
 def build_pose_model(
     cfg: ModelConfig, *, n_sessions: int = 0
 ) -> PoseDecoder | NDT3PoseDecoder:
+    n_classes = cfg.grid_x * cfg.grid_y if cfg.head == "class" else 0
     if cfg.backbone == "cnn":
         return PoseDecoder(
             in_channels=cfg.in_channels,
@@ -249,6 +257,7 @@ def build_pose_model(
             dilations=cfg.dilations,
             dropout=cfg.dropout,
             n_sessions=n_sessions,
+            n_classes=n_classes,
         )
     if cfg.backbone != "ndt3":
         raise ValueError(f"unknown backbone {cfg.backbone!r}")
@@ -261,6 +270,7 @@ def build_pose_model(
         coords=cfg.coords,
         freeze_backbone=cfg.freeze_backbone,
         feedforward_factor=cfg.feedforward_factor,
+        n_classes=n_classes,
     )
     if cfg.ndt3_file:
         ckpt = download_ndt3_checkpoint(cfg.ndt3_repo, cfg.ndt3_file)
