@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
+from collections import Counter
 from uuid import uuid4
 
 from traj.control import PurePursuit, PursuitGains
@@ -27,6 +29,18 @@ log = logging.getLogger(__name__)
 # Dropping sub-millimetre steps keeps a ten-minute trace from accumulating
 # twenty thousand points that no display can resolve.
 WALK_MIN_STEP_CM = 0.25
+
+# stim.gate's reject_reason for its refractory window. Repeated rather than
+# imported because importing stim pulls in bleak, and it is the one rejection
+# that is expected rather than a fault: with T_refrac at 2 s and frames at 30
+# Hz, roughly 59 of every 60 requests are refused this way. Logging each at
+# INFO would bury the guard refusals that actually need looking at, so this one
+# goes to DEBUG and is counted into the periodic summary instead.
+# tests/test_web_loop.py asserts it still matches stim.gate.
+REFRACTORY = "refractory"
+
+# How often the loop prints what it has been doing while a trace runs.
+SUMMARY_INTERVAL_S = 5.0
 
 STOP_REQUESTED = "requested"
 STOP_REPLACED = "replaced"
@@ -49,6 +63,9 @@ class ControlLoop:
         self._t_start: float | None = None
         self._last_decision = None
         self._failure: str | None = None
+        self._accepted = 0
+        self._rejected: Counter[str] = Counter()
+        self._t_last_summary = 0.0
 
     @property
     def active(self) -> bool:
@@ -121,6 +138,18 @@ class ControlLoop:
         self._t_start = time.monotonic()
         self._last_decision = None
         self._failure = None
+        self._accepted = 0
+        self._rejected = Counter()
+        self._t_last_summary = self._t_start
+
+        log.info(
+            "trace %d start: %d waypoints, %.1f cm, L_d %.1f cm, alpha_dead %.1f deg",
+            self._trace_id,
+            len(self._pursuit.path),
+            self._pursuit.length_cm,
+            gains.lookahead_cm,
+            math.degrees(gains.alpha_dead_rad),
+        )
 
         overlay = self._hub.overlay
         overlay.reference_cm = [list(point) for point in self._pursuit.path]
@@ -147,6 +176,20 @@ class ControlLoop:
             return None
 
         trace = self._persist(reason)
+        log.info(
+            "trace %d stop (%s): %d accepted, %d rejected %s, "
+            "%d walked points over %.0f s",
+            self._trace_id,
+            trace["stop_reason"],
+            self._accepted,
+            sum(self._rejected.values()),
+            dict(self._rejected) or "{}",
+            len(self._walked),
+            (trace["t_end"] or 0.0) - (trace["t_start"] or 0.0),
+        )
+        if self._failure is not None:
+            log.error("trace %d ended in failure: %s", self._trace_id, self._failure)
+
         self._pursuit = None
         self._hub.overlay.carrot_cm = None
         return trace
@@ -203,12 +246,73 @@ class ControlLoop:
             # is narrower than the gate's window right now. The gate has
             # already logged the rejection. Nothing was delivered and the loop
             # asks again next frame, which is what a rejection means here.
+            #
+            # Logged at WARNING rather than only pushed to the websocket
+            # journal. A guard storm looks exactly like a loop doing nothing,
+            # and with no browser attached the journal is the only record --
+            # which is what made this invisible from the terminal.
+            self._rejected["safety_guard"] += 1
+            log.warning(
+                "trace %d: %s refused by the hardware guard -- %s",
+                self._trace_id,
+                request_id,
+                exc,
+            )
             self._journal.record_rejection(
                 request_id, "traj", decision.direction, "safety_guard", str(exc)
             )
+            self._summarise()
             return
 
         self._journal.record(stim, decision)
+        self._log_result(stim, decision)
+        self._summarise()
+
+    def _log_result(self, stim, decision) -> None:
+        """One line per gate answer, at a level that matches what it means."""
+        if stim.accepted:
+            self._accepted += 1
+            log.info(
+                "trace %d: %s %s FIRED (n=%s, alpha %+.1f deg, cross-track %.1f cm)",
+                self._trace_id,
+                stim.request_id,
+                stim.direction,
+                stim.n,
+                math.degrees(decision.alpha or 0.0),
+                decision.cross_track_cm or 0.0,
+            )
+            return
+
+        reason = stim.reject_reason or "unknown"
+        self._rejected[reason] += 1
+        if reason == REFRACTORY:
+            # Expected, and far too frequent to print one line each.
+            log.debug(
+                "trace %d: %s rejected (%s)", self._trace_id, stim.request_id, reason
+            )
+        else:
+            log.warning(
+                "trace %d: %s %s rejected (%s)",
+                self._trace_id,
+                stim.request_id,
+                stim.direction,
+                reason,
+            )
+
+    def _summarise(self) -> None:
+        """A periodic line so a running trace is visible without DEBUG on."""
+        now = time.monotonic()
+        if now - self._t_last_summary < SUMMARY_INTERVAL_S:
+            return
+        self._t_last_summary = now
+        log.info(
+            "trace %d: %d accepted, %d rejected %s in %.0f s",
+            self._trace_id,
+            self._accepted,
+            sum(self._rejected.values()),
+            dict(self._rejected) or "{}",
+            now - (self._t_start or now),
+        )
 
     def _record_walked(self, x: float, y: float) -> None:
         if self._walked:

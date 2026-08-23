@@ -288,6 +288,7 @@ function boot() {
   const roachOff = !(capable.roach || {}).available;
   for (const id of ["left", "right", "stop"]) $(id).disabled = roachOff;
   $("speak").disabled = roachOff || !(capable.voice || {}).available;
+  refreshSend();
 
   if (!CONFIG.live) {
     $("video-msg").textContent = (capable.camera || {}).detail || "no camera";
@@ -299,6 +300,28 @@ function boot() {
   $("s-ld").value = state.lookahead;
   $("s-alpha").value = state.alphaDead;
   showGains();
+}
+
+// POST /api/path needs both the camera and the backpack, so Send has to be
+// gated on exactly what the endpoint requires. Leaving it enabled while the
+// turn buttons were greyed out meant a drawn path produced a 409 and no
+// visible reason -- the button looked live, so the server looked broken.
+function sendBlockedBy() {
+  const capable = CONFIG.capabilities || {};
+  for (const name of ["camera", "roach"]) {
+    if (!(capable[name] || {}).available) {
+      return `${name} unavailable: ${(capable[name] || {}).detail || "?"}`;
+    }
+  }
+  return null;
+}
+
+function refreshSend() {
+  const blocked = sendBlockedBy();
+  const button = $("send");
+  button.disabled = blocked !== null || state.stroke.length < 2;
+  button.title = blocked || "send the drawn path to the control loop";
+  if (blocked) $("canvas-hint").textContent = blocked;
 }
 
 function showGains() {
@@ -485,7 +508,7 @@ function endStroke(event) {
   activePointerId = null;
   try { canvas.releasePointerCapture(event.pointerId); } catch (_) {}
   event.preventDefault();
-  $("send").disabled = state.stroke.length < 2;
+  refreshSend();
   draw();
 }
 canvas.addEventListener("pointerup", endStroke);
@@ -530,7 +553,15 @@ async function call(path, body) {
   if (body !== undefined) options.body = JSON.stringify(body);
   const response = await fetch(path, options);
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.detail || response.statusText);
+  if (!response.ok) {
+    // The status is what says whether the server refused (409, and its detail
+    // names the missing capability), the request was malformed (400), or
+    // something broke (500). A bare message loses that.
+    const error = new Error(payload.detail || response.statusText || "no detail");
+    error.status = response.status;
+    error.path = path;
+    throw error;
+  }
   return payload;
 }
 
@@ -540,7 +571,15 @@ async function guarded(button, work) {
   try {
     await work();
   } catch (error) {
-    logRow({ type: "note", note: "request failed", detail: String(error.message) });
+    // Network failures have no status; a refusal does. Both name the endpoint,
+    // so the log says which call went wrong and why.
+    logRow({
+      type: "note",
+      note: error.status
+        ? `${error.path} -> HTTP ${error.status}`
+        : `${error.path || "request"} -> no response`,
+      detail: String(error.message),
+    });
   } finally {
     button.disabled = false;
     button.textContent = label;
@@ -564,7 +603,7 @@ $("stop").addEventListener("click", (e) => guarded(e.target, async () => {
 
 $("clear").addEventListener("click", () => {
   state.stroke = [];
-  $("send").disabled = true;
+  refreshSend();
   draw();
 });
 
@@ -582,7 +621,7 @@ $("send").addEventListener("click", (e) => guarded(e.target, async () => {
   state.traceId = reply.trace_id;
   state.stroke = [];
   state.tracing = true;
-  $("send").disabled = true;
+  refreshSend();
   draw();
 }));
 

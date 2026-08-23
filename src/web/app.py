@@ -357,6 +357,14 @@ class Runtime:
         for name in names:
             capability = self.status[name]
             if not capability.available:
+                # Logged as well as returned. uvicorn's access line says 409
+                # but not which capability was missing, and "the page does
+                # nothing" is the symptom either way.
+                log.warning(
+                    "refusing the request: %s unavailable -- %s",
+                    name,
+                    capability.detail,
+                )
                 raise HTTPException(
                     status_code=409,
                     detail=f"{name} unavailable: {capability.detail}",
@@ -662,6 +670,17 @@ def create_app(config: WebConfig) -> FastAPI:
                 detail=f"the stroke is shorter than one {config.spacing_cm} cm step",
             )
 
+        log.info(
+            "POST /api/path: %d points in, %d waypoints out at %.1f cm spacing "
+            "(first %.1f,%.1f  last %.1f,%.1f cm)",
+            len(points),
+            len(waypoints),
+            config.spacing_cm,
+            waypoints[0][0],
+            waypoints[0][1],
+            waypoints[-1][0],
+            waypoints[-1][1],
+        )
         await runtime.loop.start(waypoints, gains)
         runtime.journal.record_note(
             "tracing", f"{len(waypoints)} waypoints, {runtime.loop.length_cm:.1f} cm"
@@ -735,10 +754,24 @@ async def _request_stim(
     try:
         stim = await runtime.gate.request(direction, source, request_id)
     except RuntimeError as exc:
+        log.warning(
+            "%s %s refused by the hardware guard -- %s", source, request_id, exc
+        )
         event = runtime.journal.record_rejection(
             request_id, source, direction, "safety_guard", str(exc)
         )
         return event
+
+    if stim.accepted:
+        log.info("%s %s %s FIRED (n=%s)", source, request_id, direction, stim.n)
+    else:
+        log.warning(
+            "%s %s %s rejected (%s)",
+            source,
+            request_id,
+            direction,
+            stim.reject_reason,
+        )
     event = runtime.journal.record(stim)
     if detail is not None:
         event["detail"] = detail

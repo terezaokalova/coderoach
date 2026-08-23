@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 
 import pytest
@@ -229,3 +230,78 @@ def test_stop_is_safe_when_nothing_is_running(tmp_path):
     stopped, active = asyncio.run(scenario())
     assert stopped is None
     assert active is False
+
+
+# -- what the terminal sees ----------------------------------------------
+
+
+def test_the_repeated_reject_reason_still_matches_the_gate():
+    """web.loop spells 'refractory' out rather than importing stim.
+
+    Importing stim pulls in bleak, which the replay deployment does not
+    install. If the gate renames the reason, the loop would silently start
+    logging every refractory rejection at WARNING -- one line per frame.
+    """
+    from stim.gate import REFRACTORY as GATE_REFRACTORY
+    from web.loop import REFRACTORY
+
+    assert REFRACTORY == GATE_REFRACTORY
+
+
+def test_a_guard_refusal_reaches_the_terminal(tmp_path, caplog):
+    """The bug that made this invisible: guard refusals only hit the journal."""
+
+    async def scenario():
+        hub = FakeHub([frame(i) for i in range(3)])
+        loop = build(hub, StubGate(["guard"]), tmp_path)
+        await loop.start(STRAIGHT, GAINS)
+        await asyncio.wait_for(hub.exhausted.wait(), 2)
+        await loop.stop(STOP_REQUESTED)
+
+    with caplog.at_level(logging.WARNING, logger="web.loop"):
+        asyncio.run(scenario())
+
+    guard_lines = [r for r in caplog.records if "hardware guard" in r.message]
+    assert guard_lines, "a guard refusal printed nothing at WARNING"
+    assert guard_lines[0].levelno == logging.WARNING
+
+
+def test_refractory_rejections_do_not_flood_the_terminal(tmp_path, caplog):
+    """Expected rejections go to DEBUG; the summary carries the count.
+
+    At 30 Hz with a 2 s refractory window, roughly 59 of every 60 requests are
+    refused this way. One INFO line each would bury everything else.
+    """
+
+    async def scenario():
+        hub = FakeHub([frame(i) for i in range(6)])
+        loop = build(hub, StubGate(["refractory"]), tmp_path)
+        await loop.start(STRAIGHT, GAINS)
+        await asyncio.wait_for(hub.exhausted.wait(), 2)
+        return await loop.stop(STOP_REQUESTED)
+
+    with caplog.at_level(logging.INFO, logger="web.loop"):
+        asyncio.run(scenario())
+
+    at_info = [r for r in caplog.records if r.levelno >= logging.INFO]
+    assert not [r for r in at_info if "rejected (refractory)" in r.message]
+    # The stop line still reports every one of them.
+    stop_line = [r for r in at_info if "stop" in r.message]
+    assert stop_line and "'refractory': 6" in stop_line[0].message
+
+
+def test_start_and_stop_are_logged(tmp_path, caplog):
+    async def scenario():
+        hub = FakeHub([frame(i) for i in range(3)])
+        loop = build(hub, StubGate(["accept"]), tmp_path)
+        await loop.start(STRAIGHT, GAINS)
+        await asyncio.wait_for(hub.exhausted.wait(), 2)
+        await loop.stop(STOP_REQUESTED)
+
+    with caplog.at_level(logging.INFO, logger="web.loop"):
+        asyncio.run(scenario())
+
+    messages = [r.message for r in caplog.records]
+    assert any("start" in m and "waypoints" in m for m in messages)
+    assert any("stop (requested)" in m for m in messages)
+    assert any("FIRED" in m for m in messages)

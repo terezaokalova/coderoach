@@ -152,3 +152,52 @@ A blob straddling the arena edge is clipped and its centroid pulled inwards.
 That is the intended trade: the edge is where the homography stops being valid
 anyway. If the roach is being tracked right at the boundary in practice, the
 fix is a larger arena calibration, not a looser mask.
+
+
+# web/ -- diagnosability
+
+## Plan
+
+- [x] Server-side logging: path received, loop start, loop stop with reason,
+      every gate rejection
+- [x] Gate Send on the same capabilities `/api/path` requires, and surface the
+      status code and server message in the stimulation log
+- [x] Arena mask committed (it was already in `1eab80b`)
+- [x] `ruff format . ; ruff check --fix .`
+
+## Review
+
+A drawn path produced no stimulation and nothing on the terminal said why.
+The diagnosis: `POST /api/path` never reached `loop.start()`, so the control
+loop never ran. `stim_gate.jsonl` did not exist anywhere, and `StimGate._log`
+runs on every branch of `request()`, so the gate had been called zero times.
+Replaying the 127,913 recorded tracker frames through the real `PurePursuit`
+showed 51.6% of them would have requested a turn -- one every 0.08 s -- so a
+loop that had run at all would have left a log.
+
+Both original suspects were wrong, and both were worth ruling out on evidence
+rather than by reading:
+
+- The guard `RuntimeError` **is** caught and continued past, but the gate logs
+  the rejection to JSONL before re-raising, and there was no JSONL.
+- The charge budget was empty, and the file is not at `/tmp`: `_SAFETY_PATH`
+  uses `tempfile.gettempdir()`, which on macOS is `$TMPDIR`.
+
+What actually made this hard was that the loop's whole lifecycle went to the
+websocket journal and nowhere else, so with no browser attached there was no
+record at all. That is what the logging fixes.
+
+Two judgement calls in the logging:
+
+- **Refractory rejections go to DEBUG, not INFO.** With T_refrac at 2 s and
+  frames at 30 Hz, the gate refuses roughly 59 of every 60 requests this way.
+  One INFO line each is about 23 lines a second and would bury the guard
+  refusals that matter. Every rejection is still logged -- at a level that
+  matches whether it is expected -- and the periodic summary and the stop line
+  both carry the full counts. `--log-level debug` prints them all.
+- **Guard refusals are WARNING, one line each.** They are bounded to about one
+  per T_refrac, because `turn()` is only reached after the gate's own
+  refractory window has passed, so this cannot flood.
+
+Open: `runs/demo/traj_track.jsonl` predates the arena mask, so its 35% of
+out-of-arena poses are historical. It is left uncommitted as run data.

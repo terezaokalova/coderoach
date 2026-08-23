@@ -281,3 +281,41 @@ def test_stop_writes_the_trace_out(live):
 
     document = json.loads((live.config.run_dir / runs.PATH_NAME).read_text())
     assert document["traces"][0]["stop_reason"] == "requested"
+
+
+# -- the page's own refusal handling -------------------------------------
+
+
+def test_send_is_gated_on_what_api_path_requires():
+    """Send was enabled while Left/Right were greyed out.
+
+    POST /api/path requires the camera and the backpack, so a drawn path with
+    no backpack produced a 409 from a button that looked live. Both now come
+    from one predicate.
+    """
+    page = PAGE.read_text()
+    assert "function sendBlockedBy()" in page
+    # The same two capabilities api_path calls require() with.
+    assert '["camera", "roach"]' in page
+    # Nothing sets the button by hand any more; it all goes through one place.
+    assert '$("send").disabled = ' not in page
+    assert page.count("refreshSend()") >= 4
+
+
+def test_a_refusal_shows_its_status_code(client):
+    """The log row used to read 'request failed' and nothing else."""
+    page = PAGE.read_text()
+    assert "error.status = response.status" in page
+    assert "HTTP ${error.status}" in page
+
+    # And the server still supplies a detail worth showing.
+    body = client.post("/api/path", json={"points": [[0, 0], [5, 5]]}).json()
+    assert "unavailable" in body["detail"]
+
+
+def test_a_capability_refusal_is_logged_server_side(client, caplog):
+    import logging as stdlib_logging
+
+    with caplog.at_level(stdlib_logging.WARNING, logger="web.app"):
+        client.post("/api/turn", json={"direction": "left"})
+    assert any("roach unavailable" in r.getMessage() for r in caplog.records)

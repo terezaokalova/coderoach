@@ -119,6 +119,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--host", default="0.0.0.0", help="bind address")
+    parser.add_argument(
+        "--log-level",
+        default="info",
+        choices=("debug", "info", "warning", "error"),
+        help=(
+            "info prints trace starts and stops, every stimulation that fired, "
+            "and every rejection except the refractory ones; debug adds those "
+            "too, which is about one line per frame"
+        ),
+    )
     parser.add_argument("--port", type=int, default=8000)
 
     parser.add_argument(
@@ -306,9 +316,11 @@ def describe(
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = build_parser()
     args = parser.parse_args(argv)
+    logging.basicConfig(
+        level=args.log_level.upper(), format="%(levelname)s %(message)s"
+    )
 
     if not args.no_roach and args.t_refrac is None:
         parser.error("--t-refrac is required unless --no-roach")
@@ -331,7 +343,12 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
 
-    uvicorn.run(create_app(config), host=args.host, port=args.port, log_level="info")
+    uvicorn.run(
+        create_app(config),
+        host=args.host,
+        port=args.port,
+        log_level=args.log_level,
+    )
     return 0
 
 
